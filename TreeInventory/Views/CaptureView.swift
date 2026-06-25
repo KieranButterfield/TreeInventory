@@ -138,6 +138,11 @@ struct CaptureView: View {
                 }
             }
         }
+        .onChange(of: dbhInchesText) { _, newValue in
+            if let dbh = Double(newValue.trimmingCharacters(in: .whitespaces)) {
+                treeType = TreeRecord.derivedTreeType(fromDBH: dbh)
+            }
+        }
         .onAppear {
             if let first = project.siteCodes.first { selectedSiteCode = first }
         }
@@ -193,6 +198,11 @@ struct CaptureView: View {
                 TextField("e.g. 12.5", text: $dbhInchesText)
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: dbhInchesText) { _, newValue in
+                        if let d = Double(newValue.trimmingCharacters(in: .whitespaces)) {
+                            treeType = TreeRecord.derivedTreeType(fromDBH: d)
+                        }
+                    }
             }
         }
     }
@@ -330,9 +340,9 @@ struct CaptureView: View {
         let spread2Value = Double(spread2FeetText.trimmingCharacters(in: .whitespaces))
                         ?? capturedResult.spread2Feet
 
-        let derivedType = TreeRecord.derivedTreeType(fromDBH: dbhValue) == .largeMatureTree
-            ? TreeRecord.derivedTreeType(fromDBH: dbhValue)
-            : treeType
+        // treeType is kept in sync with DBH (manual entry above, AR result on capture)
+        // and remains overridable via the Tree Type picker on the Details step.
+        let derivedType = treeType
 
         let resolvedSiteCode = project.siteCodes.isEmpty ? siteCodeText : selectedSiteCode
 
