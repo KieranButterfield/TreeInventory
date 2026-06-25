@@ -224,6 +224,8 @@ Calibration doesn't depend on Newark's existing inventory or re-measuring any pr
 
 **Distribution for remote testing:** the mentor (Matt) is testing remotely, hours away, which rules out plugging his device into the build Mac directly. Rather than pay for an Apple Developer Program account ($99/yr) for TestFlight, the project shares the Xcode project via a GitHub repo; Matt clones it, opens it in his own Xcode, signs in with his own free Apple ID, and builds straight to his own device. This is free for both sides and avoids shipping devices back and forth, at the cost of Matt needing a Mac and a willingness to do a short one-time setup (clone, open, hit Run). The repo needs to stay buildable from a clean checkout (no machine-specific paths or untracked config) for this to work reliably.
 
+**Repo:** [github.com/KieranButterfield/TreeInventory](https://github.com/KieranButterfield/TreeInventory) (private). Matt will need to be added as a collaborator, or the repo made public, before he can clone it.
+
 **Subagent roles** (define as custom subagents in `.claude/agents/` in the project repo, dispatched by a lead session):
 
 | Agent | Owns | Must respect |
