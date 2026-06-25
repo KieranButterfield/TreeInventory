@@ -7,7 +7,7 @@
 
 import SwiftUI
 import SwiftData
-import UIKit
+import CoreLocation
 
 struct CaptureView: View {
     let project: Project
@@ -16,13 +16,17 @@ struct CaptureView: View {
 
     @State private var step: Int = 1
 
-    // Step 1 — Height
+    // AR capture sheets
+    @State private var showingHeightCapture = false
+    @State private var showingDBHCapture = false
+    @State private var showingCrownCapture = false
+
+    // Results from AR capture (merged with manual overrides)
+    @State private var capturedResult = CaptureResult()
+
+    // Manual override text fields (pre-filled from AR result)
     @State private var heightFeetText: String = ""
-
-    // Step 2 — DBH
     @State private var dbhInchesText: String = ""
-
-    // Step 3 — Crown Spread
     @State private var spread1FeetText: String = ""
     @State private var spread2FeetText: String = ""
 
@@ -36,12 +40,13 @@ struct CaptureView: View {
     @State private var species: String = ""
     @State private var notes: String = ""
 
+    @State private var location = LocationManager()
+
     private let totalSteps = 4
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Progress indicator
                 StepProgressView(current: step, total: totalSteps)
                     .padding(.horizontal)
                     .padding(.top, 16)
@@ -52,16 +57,11 @@ struct CaptureView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         switch step {
-                        case 1:
-                            heightStepView
-                        case 2:
-                            dbhStepView
-                        case 3:
-                            crownSpreadStepView
-                        case 4:
-                            detailsStepView
-                        default:
-                            EmptyView()
+                        case 1: heightStepView
+                        case 2: dbhStepView
+                        case 3: crownSpreadStepView
+                        case 4: detailsStepView
+                        default: EmptyView()
                         }
                     }
                     .padding()
@@ -69,27 +69,18 @@ struct CaptureView: View {
 
                 Divider()
 
-                // Navigation buttons
                 HStack {
                     if step > 1 {
-                        Button("Back") {
-                            withAnimation { step -= 1 }
-                        }
-                        .buttonStyle(.bordered)
+                        Button("Back") { withAnimation { step -= 1 } }
+                            .buttonStyle(.bordered)
                     }
-
                     Spacer()
-
                     if step < totalSteps {
-                        Button("Next") {
-                            withAnimation { step += 1 }
-                        }
-                        .buttonStyle(.borderedProminent)
+                        Button("Next") { withAnimation { step += 1 } }
+                            .buttonStyle(.borderedProminent)
                     } else {
-                        Button("Save") {
-                            saveRecord()
-                        }
-                        .buttonStyle(.borderedProminent)
+                        Button("Save") { saveRecord() }
+                            .buttonStyle(.borderedProminent)
                     }
                 }
                 .padding()
@@ -101,12 +92,54 @@ struct CaptureView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showingHeightCapture) {
+                NavigationStack {
+                    HeightCaptureView { result in
+                        capturedResult.heightFeet = result.heightFeet
+                        if let h = result.heightFeet {
+                            heightFeetText = String(format: "%.1f", h)
+                        }
+                        showingHeightCapture = false
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingHeightCapture = false }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showingDBHCapture) {
+                NavigationStack {
+                    DBHCaptureView { result in
+                        capturedResult.dbhInches = result.dbhInches
+                        capturedResult.pointCloudSliceRef = result.pointCloudSliceRef
+                        if let d = result.dbhInches {
+                            dbhInchesText = String(format: "%.1f", d)
+                            treeType = TreeRecord.derivedTreeType(fromDBH: d)
+                        }
+                        showingDBHCapture = false
+                    }
+                }
+            }
+            .sheet(isPresented: $showingCrownCapture) {
+                NavigationStack {
+                    CrownSpreadCaptureView { result in
+                        capturedResult.spread1Feet = result.spread1Feet
+                        capturedResult.spread2Feet = result.spread2Feet
+                        if let s1 = result.spread1Feet { spread1FeetText = String(format: "%.1f", s1) }
+                        if let s2 = result.spread2Feet { spread2FeetText = String(format: "%.1f", s2) }
+                        showingCrownCapture = false
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingCrownCapture = false }
+                        }
+                    }
+                }
+            }
         }
         .onAppear {
-            if let first = project.siteCodes.first {
-                selectedSiteCode = first
-            }
-            // Auto-set treeType hint from DBH
+            if let first = project.siteCodes.first { selectedSiteCode = first }
         }
     }
 
@@ -117,22 +150,24 @@ struct CaptureView: View {
             Label("Height Measurement", systemImage: "arrow.up.to.line")
                 .font(.title2.bold())
 
-            Text("Stand back from the tree and enter the horizontal distance, then sight the base and top.")
+            Text("Stand back from the tree. Use the AR tool to sight the base and top, or enter a value directly.")
                 .foregroundStyle(.secondary)
 
-            // TODO: plug in HeightCaptureView from ARCapture module
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Height (ft)")
+            Button {
+                showingHeightCapture = true
+            } label: {
+                Label("Measure Height with AR", systemImage: "scope")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(capturedResult.heightFeet != nil ? "AR result — edit if needed:" : "Manual entry (ft)")
                     .font(.subheadline.bold())
                 TextField("e.g. 45.0", text: $heightFeetText)
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
             }
-
-            Text("AR-assisted height capture will be available once the ARCapture module is integrated.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .italic()
         }
     }
 
@@ -141,22 +176,24 @@ struct CaptureView: View {
             Label("DBH Measurement", systemImage: "circle.dashed")
                 .font(.title2.bold())
 
-            Text("Walk to the trunk. Tap the trunk at breast height (4'4\").")
+            Text("Walk to the trunk. Tap the trunk at breast height (4'4\") with the AR tool, or enter a value directly.")
                 .foregroundStyle(.secondary)
 
-            // TODO: plug in DBHCaptureView from ARCapture module
-            VStack(alignment: .leading, spacing: 8) {
-                Text("DBH circumference (in)")
+            Button {
+                showingDBHCapture = true
+            } label: {
+                Label("Measure DBH with LiDAR", systemImage: "camera.viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(capturedResult.dbhInches != nil ? "AR result — edit if needed (in):" : "Manual entry — circumference (in)")
                     .font(.subheadline.bold())
                 TextField("e.g. 12.5", text: $dbhInchesText)
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
             }
-
-            Text("AR-assisted DBH capture will be available once the ARCapture module is integrated.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .italic()
         }
     }
 
@@ -165,32 +202,33 @@ struct CaptureView: View {
             Label("Crown Spread", systemImage: "arrow.left.and.right")
                 .font(.title2.bold())
 
-            Text("Walk to the canopy edge. Take two perpendicular measurements.")
+            Text("Walk to the canopy edge. Take two perpendicular measurements with the AR ruler, or enter values directly.")
                 .foregroundStyle(.secondary)
 
-            // TODO: plug in CrownSpreadCaptureView from ARCapture module
+            Button {
+                showingCrownCapture = true
+            } label: {
+                Label("Measure Crown Spread with AR", systemImage: "arrow.left.and.right.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Spread 1 (ft)")
+                    Text(capturedResult.spread1Feet != nil ? "Spread 1 — AR result (ft):" : "Spread 1 (ft)")
                         .font(.subheadline.bold())
                     TextField("e.g. 18.0", text: $spread1FeetText)
                         .keyboardType(.decimalPad)
                         .textFieldStyle(.roundedBorder)
                 }
-
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Spread 2 (ft)")
+                    Text(capturedResult.spread2Feet != nil ? "Spread 2 — AR result (ft):" : "Spread 2 (ft)")
                         .font(.subheadline.bold())
                     TextField("e.g. 20.0", text: $spread2FeetText)
                         .keyboardType(.decimalPad)
                         .textFieldStyle(.roundedBorder)
                 }
             }
-
-            Text("AR-assisted crown spread capture will be available once the ARCapture module is integrated.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .italic()
         }
     }
 
@@ -199,7 +237,6 @@ struct CaptureView: View {
             Label("Tree Details", systemImage: "doc.text")
                 .font(.title2.bold())
 
-            // Tree ID
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tree ID")
                     .font(.subheadline.bold())
@@ -208,7 +245,6 @@ struct CaptureView: View {
                     .autocorrectionDisabled()
             }
 
-            // Site Code
             VStack(alignment: .leading, spacing: 6) {
                 Text("Site Code")
                     .font(.subheadline.bold())
@@ -228,7 +264,6 @@ struct CaptureView: View {
                 }
             }
 
-            // Condition
             VStack(alignment: .leading, spacing: 6) {
                 Text("Condition")
                     .font(.subheadline.bold())
@@ -240,7 +275,6 @@ struct CaptureView: View {
                 .pickerStyle(.segmented)
             }
 
-            // Tree Type
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Tree Type")
@@ -259,11 +293,9 @@ struct CaptureView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // Multi-branch
             Toggle("Multi-branch", isOn: $isMultiBranch)
                 .font(.subheadline.bold())
 
-            // Species
             VStack(alignment: .leading, spacing: 6) {
                 Text("Species")
                     .font(.subheadline.bold())
@@ -271,7 +303,6 @@ struct CaptureView: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // Notes
             VStack(alignment: .leading, spacing: 6) {
                 Text("Notes")
                     .font(.subheadline.bold())
@@ -289,37 +320,51 @@ struct CaptureView: View {
     // MARK: - Save
 
     private func saveRecord() {
-        let dbhValue: Double? = Double(dbhInchesText.trimmingCharacters(in: .whitespaces))
-        let heightValue: Double? = Double(heightFeetText.trimmingCharacters(in: .whitespaces))
-        let spread1Value: Double? = Double(spread1FeetText.trimmingCharacters(in: .whitespaces))
-        let spread2Value: Double? = Double(spread2FeetText.trimmingCharacters(in: .whitespaces))
+        // Prefer manual text entry (allows override of AR result); fall back to AR result
+        let dbhValue  = Double(dbhInchesText.trimmingCharacters(in: .whitespaces))
+                     ?? capturedResult.dbhInches
+        let heightValue = Double(heightFeetText.trimmingCharacters(in: .whitespaces))
+                       ?? capturedResult.heightFeet
+        let spread1Value = Double(spread1FeetText.trimmingCharacters(in: .whitespaces))
+                        ?? capturedResult.spread1Feet
+        let spread2Value = Double(spread2FeetText.trimmingCharacters(in: .whitespaces))
+                        ?? capturedResult.spread2Feet
 
-        // Auto-set treeType based on DBH
-        let derivedTreeType: TreeType
-        if let dbh = dbhValue, dbh >= 20 {
-            derivedTreeType = .largeMatureTree
-        } else {
-            derivedTreeType = treeType
-        }
+        let derivedType = TreeRecord.derivedTreeType(fromDBH: dbhValue) == .largeMatureTree
+            ? TreeRecord.derivedTreeType(fromDBH: dbhValue)
+            : treeType
 
         let resolvedSiteCode = project.siteCodes.isEmpty ? siteCodeText : selectedSiteCode
+
+        // GPS
+        let lat  = location.location?.coordinate.latitude  ?? 0
+        let lon  = location.location?.coordinate.longitude ?? 0
+        let acc  = location.location?.horizontalAccuracy   ?? 0
+        let utm  = UTMConverter.convert(latitude: lat, longitude: lon)
 
         let record = TreeRecord(
             project: project,
             surveyorName: UserDefaults.standard.string(forKey: "surveyorName") ?? "",
-            deviceId: UIDevice.current.identifierForVendor?.uuidString ?? "",
+            deviceId: DeviceID.current,
             timestamp: Date(),
+            latitude: lat,
+            longitude: lon,
+            gpsAccuracy: acc,
+            utmNorthing: utm.northing,
+            utmEasting: utm.easting,
+            utmZone: utm.zone,
             siteCode: resolvedSiteCode,
             treeId: treeId.trimmingCharacters(in: .whitespaces),
             dbhInches: dbhValue,
             heightFeet: heightValue,
             spread1Feet: spread1Value,
             spread2Feet: spread2Value,
-            treeType: derivedTreeType,
+            treeType: derivedType,
             isMultiBranch: isMultiBranch,
             condition: condition,
             species: species.trimmingCharacters(in: .whitespaces),
-            notes: notes.trimmingCharacters(in: .whitespaces)
+            notes: notes.trimmingCharacters(in: .whitespaces),
+            pointCloudSliceRef: capturedResult.pointCloudSliceRef
         )
 
         modelContext.insert(record)
