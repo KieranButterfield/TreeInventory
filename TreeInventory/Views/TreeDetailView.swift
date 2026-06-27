@@ -419,6 +419,7 @@ struct TreeDetailView: View {
         record.spread1Feet = Double(editSpread1Text.trimmingCharacters(in: .whitespaces))
         record.spread2Feet = Double(editSpread2Text.trimmingCharacters(in: .whitespaces))
         record.photoURL = editPhotoFilename
+        try? modelContext.save()
     }
 }
 
