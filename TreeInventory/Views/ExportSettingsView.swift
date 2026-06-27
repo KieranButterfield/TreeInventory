@@ -11,15 +11,26 @@ import UIKit
 
 struct ExportSettingsView: View {
     @AppStorage("surveyorName") private var surveyorName: String = ""
+    @AppStorage("supabaseURL") private var supabaseURL: String = ""
+    @AppStorage("supabaseAnonKey") private var supabaseAnonKey: String = ""
     @Query private var projects: [Project]
     @Environment(\.modelContext) private var modelContext
 
     @State private var selectedProject: Project?
     @State private var showingAddProject = false
-    @State private var showingSyncAlert = false
+    @State private var syncAlert: SyncAlert? = nil
+    @State private var isSyncing = false
+    @State private var isTestingConnection = false
+    @State private var connectionStatus: ConnectionStatus = .unknown
     @State private var exportAlert: ExportAlert? = nil
     @State private var shareItems: [Any] = []
     @State private var showingShareSheet = false
+
+    private enum ConnectionStatus: Equatable {
+        case unknown
+        case success
+        case failure(String)
+    }
 
     var body: some View {
         NavigationStack {
@@ -75,13 +86,55 @@ struct ExportSettingsView: View {
                     }
                 }
 
-                // Sync section
-                Section("Sync") {
+                // Supabase configuration
+                Section {
+                    TextField("Project URL (https://xxxx.supabase.co)", text: $supabaseURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("Anon key", text: $supabaseAnonKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
                     Button {
-                        showingSyncAlert = true
+                        testConnection()
                     } label: {
-                        Label("Sync with Supabase", systemImage: "arrow.triangle.2.circlepath")
+                        if isTestingConnection {
+                            HStack {
+                                ProgressView()
+                                Text("Testing…")
+                            }
+                        } else {
+                            Label("Test Connection", systemImage: "antenna.radiowaves.left.and.right")
+                        }
                     }
+                    .disabled(supabaseURL.isEmpty || supabaseAnonKey.isEmpty || isTestingConnection)
+
+                    connectionStatusRow
+                } header: {
+                    Text("Supabase")
+                } footer: {
+                    Text("Found in your Supabase project under Settings > API. The anon key is meant to be embedded in client apps — it's safe to store here.")
+                }
+
+                // Sync section
+                Section {
+                    Button {
+                        syncSelectedProject()
+                    } label: {
+                        if isSyncing {
+                            HStack {
+                                ProgressView()
+                                Text("Syncing…")
+                            }
+                        } else {
+                            Label("Sync with Supabase", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(selectedProject == nil || isSyncing)
+                } footer: {
+                    Text("Uploads the selected project and its tree records. Re-syncing updates existing rows instead of duplicating them.")
                 }
             }
             .navigationTitle("Export & Settings")
@@ -92,14 +145,30 @@ struct ExportSettingsView: View {
             .sheet(isPresented: $showingShareSheet) {
                 ShareSheet(items: shareItems)
             }
-            .alert("Sync", isPresented: $showingSyncAlert) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("Supabase not configured. Add credentials in a future update.")
+            .onChange(of: supabaseURL) { _, _ in connectionStatus = .unknown }
+            .onChange(of: supabaseAnonKey) { _, _ in connectionStatus = .unknown }
+            .alert(item: $syncAlert) { alert in
+                Alert(title: Text(alert.title), message: Text(alert.message))
             }
             .alert(item: $exportAlert) { alert in
                 Alert(title: Text(alert.title), message: Text(alert.message))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var connectionStatusRow: some View {
+        switch connectionStatus {
+        case .unknown:
+            EmptyView()
+        case .success:
+            Label("Connected", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .failure(let message):
+            Label(message, systemImage: "xmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
         }
     }
 
@@ -113,11 +182,69 @@ struct ExportSettingsView: View {
             exportAlert = ExportAlert(title: "Export Failed", message: error.localizedDescription)
         }
     }
+
+    // MARK: - Supabase sync
+
+    private func testConnection() {
+        isTestingConnection = true
+        Task {
+            await SupabaseClient.shared.configure(url: supabaseURL, anonKey: supabaseAnonKey)
+            do {
+                try await SupabaseClient.shared.testConnection()
+                connectionStatus = .success
+            } catch {
+                connectionStatus = .failure(error.localizedDescription)
+            }
+            isTestingConnection = false
+        }
+    }
+
+    private func syncSelectedProject() {
+        guard let project = selectedProject else { return }
+        isSyncing = true
+        Task {
+            await SupabaseClient.shared.configure(url: supabaseURL, anonKey: supabaseAnonKey)
+            do {
+                try await SupabaseClient.shared.uploadProject(SupabaseProjectPayload(project: project))
+
+                var uploadedCount = 0
+                var failedCount = 0
+                let now = Date()
+                for record in project.treeRecords {
+                    do {
+                        try await SupabaseClient.shared.uploadRecord(SupabaseTreeRecordPayload(record: record))
+                        record.uploadedAt = now
+                        uploadedCount += 1
+                    } catch {
+                        failedCount += 1
+                    }
+                }
+                try? modelContext.save()
+
+                let message: String
+                if failedCount == 0 {
+                    message = "Uploaded \(uploadedCount) tree record\(uploadedCount == 1 ? "" : "s")."
+                } else {
+                    message = "Uploaded \(uploadedCount), failed \(failedCount). Try syncing again to retry the failed records."
+                }
+                syncAlert = SyncAlert(title: "Sync Complete", message: message)
+            } catch {
+                syncAlert = SyncAlert(title: "Sync Failed", message: error.localizedDescription)
+            }
+            isSyncing = false
+        }
+    }
 }
 
 // MARK: - Helpers
 
 struct ExportAlert: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+struct SyncAlert: Identifiable {
     let id = UUID()
     let title: String
     let message: String
