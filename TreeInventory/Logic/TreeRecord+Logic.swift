@@ -5,6 +5,16 @@
 
 import Foundation
 
+extension TreeType {
+    var displayName: String {
+        switch self {
+        case .largeMatureTree: "Large Mature Tree"
+        case .youngTree: "Young Tree"
+        case .newlyPlantedTree: "Newly Planted Tree"
+        }
+    }
+}
+
 extension TreeRecord {
 
     static func derivedTreeType(fromDBH dbhInches: Double?) -> TreeType {

@@ -7,10 +7,14 @@
 
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct TreeDetailView: View {
     @Bindable var record: TreeRecord
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
     @State private var isEditing = false
+    @State private var showingDeleteConfirm = false
 
     // Edit state
     @State private var editTreeId: String = ""
@@ -20,10 +24,15 @@ struct TreeDetailView: View {
     @State private var editIsMultiBranch: Bool = false
     @State private var editNotes: String = ""
     @State private var editSiteCode: String = ""
+    @State private var editSurveyorName: String = ""
     @State private var editDbhText: String = ""
     @State private var editHeightText: String = ""
     @State private var editSpread1Text: String = ""
     @State private var editSpread2Text: String = ""
+    @State private var editPhotoFilename: String? = nil
+
+    @State private var showingPhotoViewer = false
+    @State private var showingCamera = false
 
     private var dbhProgress: Double {
         min((record.dbhInches ?? 0) / 30.0, 1.0)
@@ -60,6 +69,37 @@ struct TreeDetailView: View {
                     withAnimation { isEditing.toggle() }
                 }
             }
+        }
+        .fullScreenCover(isPresented: $showingPhotoViewer) {
+            if let image = PhotoStorage.load(filename: record.photoURL) {
+                PhotoViewerView(image: image) { showingPhotoViewer = false }
+            }
+        }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraCaptureView(
+                onCapture: { image in
+                    if let name = PhotoStorage.save(image) {
+                        if let old = editPhotoFilename, old != name {
+                            PhotoStorage.delete(filename: old)
+                        }
+                        editPhotoFilename = name
+                    }
+                    showingCamera = false
+                },
+                onCancel: { showingCamera = false }
+            )
+            .ignoresSafeArea()
+        }
+        .onChange(of: editDbhText) { _, _ in
+            if let dbh = Double(editDbhText.trimmingCharacters(in: .whitespaces)) {
+                editTreeType = TreeRecord.derivedTreeType(fromDBH: dbh)
+            }
+        }
+        .alert("Delete this tree?", isPresented: $showingDeleteConfirm) {
+            Button("Delete", role: .destructive) { deleteTree() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes \(record.treeId.isEmpty ? "this tree" : record.treeId) and its photo. This can't be undone.")
         }
     }
 
@@ -149,20 +189,33 @@ struct TreeDetailView: View {
                     .font(.headline)
             }
 
+            // Photo
+            Group {
+                if let image = PhotoStorage.load(filename: record.photoURL) {
+                    Button {
+                        showingPhotoViewer = true
+                    } label: {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 180)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.secondary.opacity(0.1))
+                        .frame(height: 100)
+                        .overlay(
+                            Label("No Photo", systemImage: "photo")
+                                .foregroundStyle(.secondary)
+                        )
+                }
+            }
+
             // Action buttons
             VStack(spacing: 12) {
-                Button {
-                    if let urlString = record.photoURL,
-                       let url = URL(string: urlString) {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    Label("View Photos", systemImage: "photo.stack")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(record.photoURL == nil)
-
                 Button {
                     openInMaps()
                 } label: {
@@ -170,6 +223,16 @@ struct TreeDetailView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    showingDeleteConfirm = true
+                } label: {
+                    Label("Delete Tree", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .padding(.top, 16)
             }
         }
     }
@@ -179,12 +242,53 @@ struct TreeDetailView: View {
     private var editingView: some View {
         VStack(spacing: 16) {
             GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let image = PhotoStorage.load(filename: editPhotoFilename) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 160)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        HStack {
+                            Button {
+                                showingCamera = true
+                            } label: {
+                                Label("Retake", systemImage: "camera.rotate")
+                            }
+                            .buttonStyle(.bordered)
+                            Button(role: .destructive) {
+                                PhotoStorage.delete(filename: editPhotoFilename)
+                                editPhotoFilename = nil
+                            } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    } else {
+                        Button {
+                            showingCamera = true
+                        } label: {
+                            Label("Take Photo", systemImage: "camera")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            } label: {
+                Label("Photo", systemImage: "photo")
+                    .font(.headline)
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     EditField(label: "Tree ID", text: $editTreeId)
                     Divider()
                     EditField(label: "Species", text: $editSpecies)
                     Divider()
                     EditField(label: "Site Code", text: $editSiteCode)
+                    Divider()
+                    EditField(label: "Surveyor", text: $editSurveyorName)
                     Divider()
                     EditField(label: "DBH (in)", text: $editDbhText, keyboard: .decimalPad)
                     Divider()
@@ -226,8 +330,21 @@ struct TreeDetailView: View {
                         .pickerStyle(.menu)
                     }
                     Divider()
-                    Toggle("Multi-branch", isOn: $editIsMultiBranch)
-                        .font(.subheadline)
+                    Button {
+                        editIsMultiBranch.toggle()
+                    } label: {
+                        HStack {
+                            Text("Multi-branch")
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: editIsMultiBranch ? "checkmark.circle.fill" : "circle")
+                                .font(.title3)
+                                .foregroundStyle(editIsMultiBranch ? Color.green : Color.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     Divider()
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Notes")
@@ -251,9 +368,16 @@ struct TreeDetailView: View {
     // MARK: - Helpers
 
     private var spreadDisplayValue: String {
+        guard record.spread1Feet != nil || record.spread2Feet != nil else { return "—" }
         let s1 = record.spread1Feet.map { String(format: "%.1f", $0) } ?? "—"
         let s2 = record.spread2Feet.map { String(format: "%.1f", $0) } ?? "—"
         return "\(s1) × \(s2) ft"
+    }
+
+    private func deleteTree() {
+        PhotoStorage.delete(filename: record.photoURL)
+        modelContext.delete(record)
+        dismiss()
     }
 
     private func openInMaps() {
@@ -273,10 +397,12 @@ struct TreeDetailView: View {
         editIsMultiBranch = record.isMultiBranch
         editNotes = record.notes
         editSiteCode = record.siteCode
-        editDbhText = record.dbhInches.map { String($0) } ?? ""
-        editHeightText = record.heightFeet.map { String($0) } ?? ""
-        editSpread1Text = record.spread1Feet.map { String($0) } ?? ""
-        editSpread2Text = record.spread2Feet.map { String($0) } ?? ""
+        editSurveyorName = record.surveyorName
+        editDbhText = record.dbhInches.map { String(format: "%.2f", $0) } ?? ""
+        editHeightText = record.heightFeet.map { String(format: "%.2f", $0) } ?? ""
+        editSpread1Text = record.spread1Feet.map { String(format: "%.2f", $0) } ?? ""
+        editSpread2Text = record.spread2Feet.map { String(format: "%.2f", $0) } ?? ""
+        editPhotoFilename = record.photoURL
     }
 
     private func saveEdits() {
@@ -287,10 +413,12 @@ struct TreeDetailView: View {
         record.isMultiBranch = editIsMultiBranch
         record.notes = editNotes.trimmingCharacters(in: .whitespaces)
         record.siteCode = editSiteCode.trimmingCharacters(in: .whitespaces)
+        record.surveyorName = editSurveyorName.trimmingCharacters(in: .whitespaces)
         record.dbhInches = Double(editDbhText.trimmingCharacters(in: .whitespaces))
         record.heightFeet = Double(editHeightText.trimmingCharacters(in: .whitespaces))
         record.spread1Feet = Double(editSpread1Text.trimmingCharacters(in: .whitespaces))
         record.spread2Feet = Double(editSpread2Text.trimmingCharacters(in: .whitespaces))
+        record.photoURL = editPhotoFilename
     }
 }
 
@@ -352,12 +480,26 @@ struct EditField: View {
     }
 }
 
-extension TreeType {
-    var displayName: String {
-        switch self {
-        case .largeMatureTree: "Large Mature Tree"
-        case .youngTree: "Young Tree"
-        case .newlyPlantedTree: "Newly Planted Tree"
+struct PhotoViewerView: View {
+    let image: UIImage
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.white, .black.opacity(0.5))
+            }
+            .padding()
         }
     }
 }

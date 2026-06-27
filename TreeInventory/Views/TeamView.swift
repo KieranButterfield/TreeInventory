@@ -9,9 +9,13 @@ import SwiftUI
 import SwiftData
 
 struct TeamView: View {
+    @AppStorage("supabaseURL") private var supabaseURL: String = ""
+    @AppStorage("supabaseAnonKey") private var supabaseAnonKey: String = ""
+    @Environment(\.modelContext) private var modelContext
     @Query private var projects: [Project]
     @State private var selectedProject: Project?
-    @State private var showingSyncAlert = false
+    @State private var isSyncing = false
+    @State private var syncAlert: TeamSyncAlert? = nil
 
     private var sortedRecords: [TreeRecord] {
         (selectedProject?.treeRecords ?? []).sorted { $0.timestamp > $1.timestamp }
@@ -119,20 +123,75 @@ struct TeamView: View {
                 if selectedProject != nil {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button {
-                            showingSyncAlert = true
+                            syncSelectedProject()
                         } label: {
-                            Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+                            if isSyncing {
+                                ProgressView()
+                            } else {
+                                Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+                            }
                         }
+                        .disabled(isSyncing)
                     }
                 }
             }
-            .alert("Sync", isPresented: $showingSyncAlert) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("Supabase not configured yet.")
+            .alert(item: $syncAlert) { alert in
+                Alert(title: Text(alert.title), message: Text(alert.message))
             }
         }
     }
+
+    // MARK: - Supabase sync
+
+    private func syncSelectedProject() {
+        guard let project = selectedProject else { return }
+        guard !supabaseURL.isEmpty, !supabaseAnonKey.isEmpty else {
+            syncAlert = TeamSyncAlert(
+                title: "Not Configured",
+                message: "Add your Supabase project URL and anon key in Export & Settings first."
+            )
+            return
+        }
+
+        isSyncing = true
+        Task {
+            await SupabaseClient.shared.configure(url: supabaseURL, anonKey: supabaseAnonKey)
+            do {
+                try await SupabaseClient.shared.uploadProject(SupabaseProjectPayload(project: project))
+
+                var uploadedCount = 0
+                var failedCount = 0
+                let now = Date()
+                for record in project.treeRecords {
+                    do {
+                        try await SupabaseClient.shared.uploadRecord(SupabaseTreeRecordPayload(record: record))
+                        record.uploadedAt = now
+                        uploadedCount += 1
+                    } catch {
+                        failedCount += 1
+                    }
+                }
+                try? modelContext.save()
+
+                let message: String
+                if failedCount == 0 {
+                    message = "Uploaded \(uploadedCount) tree record\(uploadedCount == 1 ? "" : "s") to Supabase."
+                } else {
+                    message = "Uploaded \(uploadedCount), failed \(failedCount). Try syncing again to retry the failed records."
+                }
+                syncAlert = TeamSyncAlert(title: "Sync Complete", message: message)
+            } catch {
+                syncAlert = TeamSyncAlert(title: "Sync Failed", message: error.localizedDescription)
+            }
+            isSyncing = false
+        }
+    }
+}
+
+struct TeamSyncAlert: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 #Preview {
