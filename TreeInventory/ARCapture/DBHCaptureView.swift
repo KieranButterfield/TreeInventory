@@ -21,23 +21,38 @@ struct DBHCaptureView: View {
 
     @State private var pendingCircumferenceInches: Double? = nil
     @State private var pendingSliceRef: String? = nil
+    @State private var pendingLowConfidence: Bool = false
     @State private var showConfirm = false
+    @State private var tapHint: String? = nil
+    @State private var hintDismissTask: Task<Void, Never>? = nil
 
     // MARK: - Body
 
     var body: some View {
         ZStack(alignment: .bottom) {
             // AR camera feed
-            ARViewContainer { circumferenceInches, sliceRef in
-                pendingCircumferenceInches = circumferenceInches
-                pendingSliceRef = sliceRef
-                showConfirm = true
-            }
+            ARViewContainer(
+                onResult: { circumferenceInches, sliceRef, lowConfidence in
+                    tapHint = nil
+                    pendingCircumferenceInches = circumferenceInches
+                    pendingSliceRef = sliceRef
+                    pendingLowConfidence = lowConfidence
+                    showConfirm = true
+                },
+                onTapFailed: { reason in
+                    showTapHint(reason)
+                }
+            )
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 // Instruction banner
                 instructionBanner
+
+                if let tapHint {
+                    tapHintBanner(tapHint)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
 
                 // Result + confirm panel (slides up when a result arrives)
                 if showConfirm, let circ = pendingCircumferenceInches {
@@ -46,20 +61,47 @@ struct DBHCaptureView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.3), value: showConfirm)
+            .animation(.easeInOut(duration: 0.2), value: tapHint)
         }
+    }
+
+    // MARK: - Tap feedback
+
+    /// Shows a brief on-screen reason when a tap doesn't produce a measurement,
+    /// so the surveyor isn't tapping blindly with no feedback in the field.
+    private func showTapHint(_ reason: String) {
+        tapHint = reason
+        hintDismissTask?.cancel()
+        hintDismissTask = Task {
+            try? await Task.sleep(for: .seconds(3.5))
+            if !Task.isCancelled { tapHint = nil }
+        }
+    }
+
+    private func tapHintBanner(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.orange.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
     }
 
     // MARK: - Sub-views
 
     private var instructionBanner: some View {
-        Text("Tap the trunk at breast height")
+        Text("Slowly pan across the trunk at breast height for a couple seconds, then tap it")
             .font(.headline)
             .foregroundStyle(.white)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .padding(.top, 16)
-            .frame(maxWidth: .infinity)
+            .multilineTextAlignment(.center)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.top, 16)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -68,6 +110,14 @@ struct DBHCaptureView: View {
 
         VStack(spacing: 12) {
             Divider()
+
+            if pendingLowConfidence {
+                Label("Limited trunk view — this reading may run small. Retake and pan farther around the trunk first.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal)
+            }
 
             HStack {
                 VStack(alignment: .leading, spacing: 4) {

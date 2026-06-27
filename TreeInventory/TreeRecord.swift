@@ -57,6 +57,10 @@ final class TreeRecord {
     // Inventory fields
     var species: String
     var notes: String
+    // Stores only a local filename (resolved against Documents/TreePhotos/ via
+    // PhotoStorage), not a full URL — keeps working across reinstalls/updates
+    // since the sandbox container path can change. Pending Supabase upload,
+    // this will hold a remote URL instead.
     var photoURL: String?
 
     // QA artifact — not exported to CSV

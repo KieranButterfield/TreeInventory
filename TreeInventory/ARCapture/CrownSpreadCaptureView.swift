@@ -7,8 +7,9 @@
 //  Each measurement:
 //    • First tap  → anchors point A
 //    • Second tap → anchors point B; computes Euclidean distance converted to feet
-//  This is repeated for spread1 and spread2.
-//  Both measurements shown; "Done" calls onComplete.
+//  This is repeated for spread1 and spread2. Either spread can be redone
+//  independently without disturbing the other. Both measurements shown;
+//  "Done" calls onComplete.
 //
 
 import SwiftUI
@@ -26,6 +27,9 @@ struct CrownSpreadCaptureView: View {
 
     @State private var spread1Feet: Double? = nil
     @State private var spread2Feet: Double? = nil
+    @State private var coordinatorRef: SpreadCoordinator? = nil
+    @State private var tapHint: String? = nil
+    @State private var hintDismissTask: Task<Void, Never>? = nil
 
     // MARK: - Body
 
@@ -33,14 +37,50 @@ struct CrownSpreadCaptureView: View {
         ZStack(alignment: .bottom) {
             SpreadARContainer(
                 spread1Feet: $spread1Feet,
-                spread2Feet: $spread2Feet
+                spread2Feet: $spread2Feet,
+                onCoordinatorReady: { coordinatorRef = $0 },
+                onTapFailed: { reason in showTapHint(reason) }
             )
             .ignoresSafeArea()
 
-            bottomPanel
+            VStack(spacing: 8) {
+                if let tapHint {
+                    tapHintBanner(tapHint)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                Spacer()
+                bottomPanel
+            }
+            .animation(.easeInOut(duration: 0.2), value: tapHint)
         }
         .navigationTitle("Crown Spread")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Tap feedback
+
+    /// Shows a brief on-screen reason when a tap doesn't register or gets
+    /// rejected (e.g. it likely landed on a different tree or the ground far
+    /// behind the canopy), so the surveyor isn't tapping blindly.
+    private func showTapHint(_ reason: String) {
+        tapHint = reason
+        hintDismissTask?.cancel()
+        hintDismissTask = Task {
+            try? await Task.sleep(for: .seconds(3.5))
+            if !Task.isCancelled { tapHint = nil }
+        }
+    }
+
+    private func tapHintBanner(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.orange.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
     }
 
     // MARK: - Bottom panel
@@ -57,13 +97,11 @@ struct CrownSpreadCaptureView: View {
     private var instructionBanner: some View {
         let msg: String
         if spread1Feet == nil {
-            msg = "Tap one edge of the crown (spread 1 — point A)"
-        } else if spread2Feet == nil && spread1Feet != nil {
-            // We know spread1 is underway or done; the coordinator handles
-            // which tap within spread1/spread2 is expected.
-            msg = "Tap to complete measurement"
+            msg = "Tap one edge of the crown, then the opposite edge (spread 1)"
+        } else if spread2Feet == nil {
+            msg = "Now tap one edge, then the opposite edge for spread 2 (rotate ~90°)"
         } else {
-            msg = "Both spreads measured — tap Done"
+            msg = "Both spreads measured — tap Done, or Redo either one"
         }
         return Text(msg)
             .font(.subheadline)
@@ -77,8 +115,12 @@ struct CrownSpreadCaptureView: View {
     @ViewBuilder
     private var measurementDisplay: some View {
         HStack(spacing: 20) {
-            measurementCell(label: "Spread 1", value: spread1Feet)
-            measurementCell(label: "Spread 2", value: spread2Feet)
+            measurementCell(label: "Spread 1", value: spread1Feet) {
+                coordinatorRef?.redo(spread: 1)
+            }
+            measurementCell(label: "Spread 2", value: spread2Feet) {
+                coordinatorRef?.redo(spread: 2)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
@@ -96,7 +138,7 @@ struct CrownSpreadCaptureView: View {
     }
 
     @ViewBuilder
-    private func measurementCell(label: String, value: Double?) -> some View {
+    private func measurementCell(label: String, value: Double?, onRedo: @escaping () -> Void) -> some View {
         VStack(spacing: 2) {
             Text(label)
                 .font(.caption)
@@ -104,12 +146,15 @@ struct CrownSpreadCaptureView: View {
             if let v = value {
                 Text(String(format: "%.1f ft", v))
                     .font(.title3.monospacedDigit().bold())
+                Button("Redo", action: onRedo)
+                    .font(.caption2)
             } else {
                 Text("—")
                     .font(.title3)
                     .foregroundStyle(.tertiary)
             }
         }
+        .frame(minWidth: 80)
     }
 }
 
@@ -119,11 +164,14 @@ private struct SpreadARContainer: UIViewRepresentable {
 
     @Binding var spread1Feet: Double?
     @Binding var spread2Feet: Double?
+    var onCoordinatorReady: (SpreadCoordinator) -> Void = { _ in }
+    var onTapFailed: (String) -> Void = { _ in }
 
     func makeCoordinator() -> SpreadCoordinator {
         SpreadCoordinator(
             spread1Binding: $spread1Feet,
-            spread2Binding: $spread2Feet
+            spread2Binding: $spread2Feet,
+            onTapFailed: onTapFailed
         )
     }
 
@@ -139,6 +187,7 @@ private struct SpreadARContainer: UIViewRepresentable {
 
         context.coordinator.sceneView = view
         context.coordinator.startSession()
+        onCoordinatorReady(context.coordinator)
         return view
     }
 
@@ -159,23 +208,32 @@ final class SpreadCoordinator: NSObject {
     // Bindings back to SwiftUI
     private var spread1Binding: Binding<Double?>
     private var spread2Binding: Binding<Double?>
+    private let onTapFailed: (String) -> Void
 
-    // Tap-state machine:
-    // phase 0: waiting for spread-1 point A
-    // phase 1: waiting for spread-1 point B
-    // phase 2: waiting for spread-2 point A
-    // phase 3: waiting for spread-2 point B
-    // phase 4: done
-    private var phase = 0
+    /// Which spread the next pair of taps fills in. 0 means both are done
+    /// and no redo is in progress (taps are ignored until Redo is tapped).
+    private var activeSpread: Int = 1
     private var pointA: SIMD3<Float>? = nil
+    /// Distance from the camera to pointA, used to sanity-check point B.
+    private var pointADistance: Float? = nil
 
-    // Visual anchor nodes
-    private var markerNodes: [SCNNode] = []
-    private var lineNodes:   [SCNNode] = []
+    // Visual anchor nodes, tracked per spread so a redo only clears that
+    // spread's markers/line.
+    private var spread1Nodes: [SCNNode] = []
+    private var spread2Nodes: [SCNNode] = []
 
-    init(spread1Binding: Binding<Double?>, spread2Binding: Binding<Double?>) {
+    /// Raycast hits farther than this from the camera are rejected outright —
+    /// catches taps that "jumped" through a canopy gap onto the ground or a
+    /// tree far behind the subject tree.
+    private let maxPlausibleDistance: Float = 15.0   // meters (~49 ft)
+    /// If point B's distance from the camera differs from point A's by more
+    /// than this, it likely landed on a different object than point A did.
+    private let maxPairDistanceDelta: Float = 6.0    // meters (~20 ft)
+
+    init(spread1Binding: Binding<Double?>, spread2Binding: Binding<Double?>, onTapFailed: @escaping (String) -> Void = { _ in }) {
         self.spread1Binding = spread1Binding
         self.spread2Binding = spread2Binding
+        self.onTapFailed = onTapFailed
     }
 
     func startSession() {
@@ -192,61 +250,97 @@ final class SpreadCoordinator: NSObject {
         sceneView?.session.pause()
     }
 
+    /// Restarts capture for one spread (1 or 2) without disturbing the other.
+    func redo(spread: Int) {
+        guard spread == 1 || spread == 2 else { return }
+        clearNodes(for: spread)
+        if spread == 1 {
+            spread1Binding.wrappedValue = nil
+        } else {
+            spread2Binding.wrappedValue = nil
+        }
+        pointA = nil
+        pointADistance = nil
+        activeSpread = spread
+    }
+
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-        guard phase < 4, let sceneView else { return }
+        guard activeSpread != 0, let sceneView else { return }
         let location = gesture.location(in: sceneView)
 
         // Try mesh raycast first, fall back to estimated plane.
-        let worldPos: SIMD3<Float>?
-        if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any),
-           let hit = sceneView.session.raycast(query).first {
-            let col = hit.worldTransform.columns.3
-            worldPos = SIMD3(col.x, col.y, col.z)
-        } else if let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any),
-                  let hit = sceneView.session.raycast(query).first {
-            let col = hit.worldTransform.columns.3
-            worldPos = SIMD3(col.x, col.y, col.z)
-        } else {
-            worldPos = nil
+        var hitResult: ARRaycastResult? = nil
+        if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
+            hitResult = sceneView.session.raycast(query).first
+        }
+        if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) {
+            hitResult = sceneView.session.raycast(query).first
         }
 
-        guard let pos = worldPos else { return }
+        guard let result = hitResult,
+              let cameraTransform = sceneView.session.currentFrame?.camera.transform
+        else {
+            onTapFailed("No surface detected there. Move slightly closer and try again.")
+            return
+        }
 
-        switch phase {
-        case 0, 2:
-            // Point A of a new measurement.
-            pointA = pos
-            placeMarker(at: pos, color: .systemBlue)
-            phase += 1
+        let col = result.worldTransform.columns.3
+        let pos = SIMD3<Float>(col.x, col.y, col.z)
+        let camCol = cameraTransform.columns.3
+        let camPos = SIMD3<Float>(camCol.x, camCol.y, camCol.z)
+        let distFromCamera = simd_length(pos - camPos)
 
-        case 1, 3:
-            // Point B — compute distance.
-            guard let a = pointA else { return }
-            let b = pos
-            let diff = b - a
-            let distMetres = sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z)
-            let distFeet = Double(distMetres) * 3.28084
+        // Reject hits that are implausibly far away — almost always means the
+        // tap "jumped" through a gap in the canopy onto the ground or another
+        // tree behind the subject.
+        guard distFromCamera <= maxPlausibleDistance else {
+            onTapFailed("That tap landed unexpectedly far away — probably a different tree or the ground behind it. Try tapping a clearer, closer edge of this tree's canopy.")
+            return
+        }
 
-            placeMarker(at: b, color: .systemOrange)
-            drawLine(from: a, to: b)
+        if let a = pointA, let aDist = pointADistance {
+            // This tap is point B of the current pair.
+            let delta = abs(distFromCamera - aDist)
+            guard delta <= maxPairDistanceDelta else {
+                onTapFailed("That second tap landed much farther or closer than the first one — it likely hit a different tree. Try tapping the matching edge of the same canopy.")
+                return
+            }
 
-            if phase == 1 {
+            let diff = pos - a
+            let distMetres = Double(simd_length(diff))
+            let distFeet = distMetres * 3.28084
+
+            placeMarker(at: pos, color: .systemOrange, spread: activeSpread)
+            drawLine(from: a, to: pos, spread: activeSpread)
+
+            if activeSpread == 1 {
                 spread1Binding.wrappedValue = distFeet
             } else {
                 spread2Binding.wrappedValue = distFeet
             }
 
             pointA = nil
-            phase += 1
+            pointADistance = nil
 
-        default:
-            break
+            // Advance to whichever spread still needs capturing, or finish.
+            if activeSpread == 1 && spread2Binding.wrappedValue == nil {
+                activeSpread = 2
+            } else if activeSpread == 2 && spread1Binding.wrappedValue == nil {
+                activeSpread = 1
+            } else {
+                activeSpread = 0
+            }
+        } else {
+            // This tap is point A of a new pair.
+            pointA = pos
+            pointADistance = distFromCamera
+            placeMarker(at: pos, color: .systemBlue, spread: activeSpread)
         }
     }
 
     // MARK: - AR Markers & Lines
 
-    private func placeMarker(at pos: SIMD3<Float>, color: UIColor) {
+    private func placeMarker(at pos: SIMD3<Float>, color: UIColor, spread: Int) {
         guard let sceneView else { return }
         let sphere = SCNSphere(radius: 0.03)
         let mat = SCNMaterial()
@@ -256,10 +350,10 @@ final class SpreadCoordinator: NSObject {
         let node = SCNNode(geometry: sphere)
         node.position = SCNVector3(pos.x, pos.y, pos.z)
         sceneView.scene.rootNode.addChildNode(node)
-        markerNodes.append(node)
+        if spread == 1 { spread1Nodes.append(node) } else { spread2Nodes.append(node) }
     }
 
-    private func drawLine(from a: SIMD3<Float>, to b: SIMD3<Float>) {
+    private func drawLine(from a: SIMD3<Float>, to b: SIMD3<Float>, spread: Int) {
         guard let sceneView else { return }
 
         // Build a thin box oriented between the two points.
@@ -293,6 +387,16 @@ final class SpreadCoordinator: NSObject {
         }
 
         sceneView.scene.rootNode.addChildNode(node)
-        lineNodes.append(node)
+        if spread == 1 { spread1Nodes.append(node) } else { spread2Nodes.append(node) }
+    }
+
+    private func clearNodes(for spread: Int) {
+        if spread == 1 {
+            spread1Nodes.forEach { $0.removeFromParentNode() }
+            spread1Nodes.removeAll()
+        } else {
+            spread2Nodes.forEach { $0.removeFromParentNode() }
+            spread2Nodes.removeAll()
+        }
     }
 }

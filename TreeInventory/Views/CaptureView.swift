@@ -8,11 +8,18 @@
 import SwiftUI
 import SwiftData
 import CoreLocation
+import UIKit
 
 struct CaptureView: View {
     let project: Project
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+
+    // Device-wide "last used" surveyor name (shared with Export tab).
+    @AppStorage("surveyorName") private var defaultSurveyorName: String = ""
+    @State private var surveyorName: String = ""
+    @State private var showingSurveyorPrompt = false
+    @State private var surveyorPromptText: String = ""
 
     @State private var step: Int = 1
 
@@ -39,10 +46,46 @@ struct CaptureView: View {
     @State private var isMultiBranch: Bool = false
     @State private var species: String = ""
     @State private var notes: String = ""
+    @State private var photoFilename: String? = nil
+    @State private var showingCamera = false
 
     @State private var location = LocationManager()
 
     private let totalSteps = 4
+
+    // Looks at every Tree ID already recorded for this project, finds the one
+    // with the highest trailing number, and suggests that number + 1 — keeping
+    // the same prefix and zero-padding width (e.g. "T-004" -> "T-005").
+    // Falls back to "T-001" when there's nothing to go on yet.
+    private var suggestedTreeId: String {
+        var bestPrefix = "T-"
+        var bestWidth = 3
+        var maxNumber = 0
+        var found = false
+
+        for id in project.treeRecords.map(\.treeId) {
+            var digits = ""
+            var splitIndex = id.endIndex
+            while splitIndex > id.startIndex {
+                let prev = id.index(before: splitIndex)
+                guard id[prev].isNumber else { break }
+                digits.insert(id[prev], at: digits.startIndex)
+                splitIndex = prev
+            }
+            guard !digits.isEmpty, let number = Int(digits), number >= maxNumber || !found else { continue }
+            maxNumber = number
+            bestPrefix = String(id[id.startIndex..<splitIndex])
+            bestWidth = digits.count
+            found = true
+        }
+
+        guard found else { return "T-001" }
+        let nextDigits = String(maxNumber + 1)
+        let padded = nextDigits.count < bestWidth
+            ? String(repeating: "0", count: bestWidth - nextDigits.count) + nextDigits
+            : nextDigits
+        return bestPrefix + padded
+    }
 
     var body: some View {
         NavigationStack {
@@ -138,6 +181,22 @@ struct CaptureView: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraCaptureView(
+                onCapture: { image in
+                    if let name = PhotoStorage.save(image) {
+                        // Replacing a photo? Clean up the old file first.
+                        if let old = photoFilename, old != name {
+                            PhotoStorage.delete(filename: old)
+                        }
+                        photoFilename = name
+                    }
+                    showingCamera = false
+                },
+                onCancel: { showingCamera = false }
+            )
+            .ignoresSafeArea()
+        }
         .onChange(of: dbhInchesText) { _, newValue in
             if let dbh = Double(newValue.trimmingCharacters(in: .whitespaces)) {
                 treeType = TreeRecord.derivedTreeType(fromDBH: dbh)
@@ -145,6 +204,24 @@ struct CaptureView: View {
         }
         .onAppear {
             if let first = project.siteCodes.first { selectedSiteCode = first }
+            surveyorName = defaultSurveyorName
+            if defaultSurveyorName.trimmingCharacters(in: .whitespaces).isEmpty {
+                showingSurveyorPrompt = true
+            }
+        }
+        .alert("Who's surveying?", isPresented: $showingSurveyorPrompt) {
+            TextField("Your name", text: $surveyorPromptText)
+                .autocorrectionDisabled()
+            Button("Save") {
+                let trimmed = surveyorPromptText.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    surveyorName = trimmed
+                    defaultSurveyorName = trimmed
+                }
+            }
+            Button("Skip", role: .cancel) {}
+        } message: {
+            Text("Saved automatically with each tree you measure. You can change it anytime on the Details step or in Export.")
         }
     }
 
@@ -155,7 +232,7 @@ struct CaptureView: View {
             Label("Height Measurement", systemImage: "arrow.up.to.line")
                 .font(.title2.bold())
 
-            Text("Stand back from the tree. Use the AR tool to sight the base and top, or enter a value directly.")
+            Text("Sight the base and top with AR, or enter a value directly. (Short tree? Just use a tape measure.)")
                 .foregroundStyle(.secondary)
 
             Button {
@@ -181,7 +258,7 @@ struct CaptureView: View {
             Label("DBH Measurement", systemImage: "circle.dashed")
                 .font(.title2.bold())
 
-            Text("Walk to the trunk. Tap the trunk at breast height (4'4\") with the AR tool, or enter a value directly.")
+            Text("Tap the trunk at breast height with AR, or enter a value directly. (Too short? Measure at 6\" and mark as Newly Planted.)")
                 .foregroundStyle(.secondary)
 
             Button {
@@ -211,6 +288,9 @@ struct CaptureView: View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Crown Spread", systemImage: "arrow.left.and.right")
                 .font(.title2.bold())
+
+            Text("Crown spread is the average width of the tree's canopy — found by measuring straight across it twice, at a right angle to each other, and averaging the two readings.")
+                .foregroundStyle(.secondary)
 
             Text("Walk to the canopy edge. Take two perpendicular measurements with the AR ruler, or enter values directly.")
                 .foregroundStyle(.secondary)
@@ -250,9 +330,26 @@ struct CaptureView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tree ID")
                     .font(.subheadline.bold())
-                TextField("e.g. T-001", text: $treeId)
+                TextField("e.g. \(suggestedTreeId)", text: $treeId)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Surveyor")
+                        .font(.subheadline.bold())
+                    Spacer()
+                    Text("(carries over to the next tree)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                TextField("Your name", text: $surveyorName)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .onChange(of: surveyorName) { _, newValue in
+                        defaultSurveyorName = newValue
+                    }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -290,21 +387,38 @@ struct CaptureView: View {
                     Text("Tree Type")
                         .font(.subheadline.bold())
                     Spacer()
-                    Text("(auto-set from DBH ≥ 20)")
+                    Text("(auto-set from DBH)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Picker("Tree Type", selection: $treeType) {
-                    Text("Large Mature").tag(TreeType.largeMatureTree)
-                    Text("Young").tag(TreeType.youngTree)
-                    Text("Newly Planted").tag(TreeType.newlyPlantedTree)
+                HStack {
+                    Picker("Tree Type", selection: $treeType) {
+                        Text("Large Mature").tag(TreeType.largeMatureTree)
+                        Text("Young").tag(TreeType.youngTree)
+                        Text("Newly Planted").tag(TreeType.newlyPlantedTree)
+                    }
+                    .pickerStyle(.menu)
+                    Spacer()
                 }
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Toggle("Multi-branch", isOn: $isMultiBranch)
-                .font(.subheadline.bold())
+            Divider()
+
+            Button {
+                isMultiBranch.toggle()
+            } label: {
+                HStack {
+                    Text("Multi-branch")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: isMultiBranch ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(isMultiBranch ? Color.green : Color.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Species")
@@ -323,6 +437,42 @@ struct CaptureView: View {
                         RoundedRectangle(cornerRadius: 8)
                             .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
                     )
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Photo")
+                    .font(.subheadline.bold())
+                if let image = PhotoStorage.load(filename: photoFilename) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(height: 160)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    HStack {
+                        Button {
+                            showingCamera = true
+                        } label: {
+                            Label("Retake", systemImage: "camera.rotate")
+                        }
+                        .buttonStyle(.bordered)
+                        Button(role: .destructive) {
+                            PhotoStorage.delete(filename: photoFilename)
+                            photoFilename = nil
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                } else {
+                    Button {
+                        showingCamera = true
+                    } label: {
+                        Label("Take Photo", systemImage: "camera")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
         }
     }
@@ -354,7 +504,7 @@ struct CaptureView: View {
 
         let record = TreeRecord(
             project: project,
-            surveyorName: UserDefaults.standard.string(forKey: "surveyorName") ?? "",
+            surveyorName: surveyorName.trimmingCharacters(in: .whitespaces),
             deviceId: DeviceID.current,
             timestamp: Date(),
             latitude: lat,
@@ -374,6 +524,7 @@ struct CaptureView: View {
             condition: condition,
             species: species.trimmingCharacters(in: .whitespaces),
             notes: notes.trimmingCharacters(in: .whitespaces),
+            photoURL: photoFilename,
             pointCloudSliceRef: capturedResult.pointCloudSliceRef
         )
 

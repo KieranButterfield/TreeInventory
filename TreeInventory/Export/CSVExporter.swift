@@ -46,7 +46,7 @@ nonisolated enum CSVExporter {
                 r.utmZone,
                 r.siteCode,
                 r.treeId,
-                r.photoURL ?? "",
+                r.photoURL ?? "", // local filename (Documents/TreePhotos/) until Supabase upload is wired up
                 r.dbhInches.map { String($0) } ?? "",
                 r.heightFeet.map { String($0) } ?? "",
                 r.spread1Feet.map { String($0) } ?? "",

@@ -18,3 +18,7 @@ xcuserdata/
 ## CocoaPods (not used here, but harmless to ignore)
 
 Pods/
+
+## Agent worktrees (not part of the Xcode build)
+
+.claude/

@@ -29,24 +29,45 @@ enum KasaFit {
     static func fit(points: [(x: Float, z: Float)]) -> (cx: Float, cz: Float, radius: Float)? {
         guard points.count >= 3 else { return nil }
 
-        // Accumulate the six sums needed to build the normal equations.
-        // The Kasa formulation linearises  xi² + zi² = a·xi + b·zi + c
-        // by substituting  u = xi,  v = zi,  w = xi² + zi²
-        // and solving the least-squares system for [a, b, c].
-
-        var Sx:  Double = 0   // Σ xi
-        var Sz:  Double = 0   // Σ zi
-        var Sxx: Double = 0   // Σ xi²
-        var Szz: Double = 0   // Σ zi²
-        var Sxz: Double = 0   // Σ xi·zi
-        var Sxw: Double = 0   // Σ xi·wi   where wi = xi²+zi²
-        var Szw: Double = 0   // Σ zi·wi
-        var Sw:  Double = 0   // Σ wi
+        // Center the data on its centroid before fitting. This is a
+        // numerical-conditioning improvement, not an accuracy one: the
+        // trunk slice sits wherever the surveyor is standing in the AR
+        // world coordinate system (could be a few metres from the AR
+        // origin), and squaring/cubing those raw, off-center coordinates in
+        // the normal equations below loses more floating-point precision
+        // than squaring small centroid-relative offsets does. Verified by
+        // simulation that this does NOT change the fit's statistical bias
+        // on a partial arc (that bias is inherent to least-squares circle
+        // fitting itself, not a coordinate-system artifact) — see
+        // ARViewContainer's angular-coverage check for the actual mitigation
+        // for partial-arc readings.
         let n = Double(points.count)
+        var meanX: Double = 0
+        var meanZ: Double = 0
+        for p in points {
+            meanX += Double(p.x)
+            meanZ += Double(p.z)
+        }
+        meanX /= n
+        meanZ /= n
+
+        // Accumulate the six sums needed to build the normal equations.
+        // The Kasa formulation linearises  ui² + vi² = a·ui + b·vi + c
+        // (u, v are the centered coordinates) by substituting
+        // w = ui² + vi² and solving the least-squares system for [a, b, c].
+
+        var Sx:  Double = 0   // Σ ui
+        var Sz:  Double = 0   // Σ vi
+        var Sxx: Double = 0   // Σ ui²
+        var Szz: Double = 0   // Σ vi²
+        var Sxz: Double = 0   // Σ ui·vi
+        var Sxw: Double = 0   // Σ ui·wi   where wi = ui²+vi²
+        var Szw: Double = 0   // Σ vi·wi
+        var Sw:  Double = 0   // Σ wi
 
         for p in points {
-            let x = Double(p.x)
-            let z = Double(p.z)
+            let x = Double(p.x) - meanX
+            let z = Double(p.z) - meanZ
             let w = x * x + z * z
             Sx  += x
             Sz  += z
@@ -78,11 +99,16 @@ enum KasaFit {
         let b = sol[1]
         let c = sol[2]
 
-        let cx = a / 2.0
-        let cz = b / 2.0
-        let r2 = c + cx * cx + cz * cz
+        // Center, in the centroid-relative frame — translate back to world
+        // coordinates before returning.
+        let centerOffsetX = a / 2.0
+        let centerOffsetZ = b / 2.0
+        let r2 = c + centerOffsetX * centerOffsetX + centerOffsetZ * centerOffsetZ
         guard r2 > 0 else { return nil }
         let radius = sqrt(r2)
+
+        let cx = centerOffsetX + meanX
+        let cz = centerOffsetZ + meanZ
 
         return (cx: Float(cx), cz: Float(cz), radius: Float(radius))
     }

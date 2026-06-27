@@ -5,10 +5,25 @@
 //  CoreMotion tangent-angle hypsometer.
 //
 //  Formula:
-//    height = distance × (tan(topAngle) + tan(baseAngle))
+//    height = distance × (tan(topAngle) - tan(baseAngle))
 //
-//  where angles are device pitch (tilt from horizontal) in radians,
-//  with positive pitch meaning the device is tilted upward.
+//  where angles are the elevation angle of the device's BACK (the camera
+//  side — the axis the surveyor actually aims at the tree while watching
+//  the live readout on the screen) above horizontal, in radians,
+//  positive = tilted up.
+//
+//  The angle is computed from the gravity vector rather than
+//  CMAttitude.pitch, using gravity.z: in Apple's device-coordinate
+//  convention the Z axis is the screen normal (points out of the screen,
+//  toward the surveyor), so the back/camera axis is -Z, and its elevation
+//  above horizontal is asin(gravity.z). This avoids Euler-angle
+//  decomposition issues entirely, and — importantly — uses the axis that
+//  matches how this tool is actually held (aiming the camera at the
+//  tree), not the device's top edge. An earlier version of this code used
+//  the top-edge (Y) axis, which stays close to vertical throughout normal
+//  use here and barely changes between the base and top sightings —
+//  that's what was producing near-identical (and so near-cancelling)
+//  angles for every tree, regardless of true height.
 //
 //  NOTE: NSMotionUsageDescription must be present in the app's Info.plist.
 //  See ARViewContainer.swift for the Xcode build-settings key to add.
@@ -32,8 +47,10 @@ private final class HeightMotionState {
         motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
-            // Pitch: positive = nose up, negative = nose down.
-            self.livePitch = motion.attitude.pitch
+            // Elevation angle of the device's back/camera axis above
+            // horizontal, from the gravity vector (see header comment).
+            let gz = min(max(motion.gravity.z, -1), 1)
+            self.livePitch = asin(gz)
         }
     }
 
@@ -66,6 +83,7 @@ struct HeightCaptureView: View {
     @State private var distanceText = ""
     @State private var computedHeight: Double? = nil
     @State private var overrideText = ""
+    @State private var showingDistanceCapture = false
 
     /// Which sighting phase is active: nil = none, true = base, false = top
     @State private var sightingBase: Bool? = nil
@@ -80,22 +98,38 @@ struct HeightCaptureView: View {
 
     var body: some View {
         Form {
-            Section("Horizontal Distance") {
+            Section {
                 HStack {
                     TextField("Distance (feet)", text: $distanceText)
                         .keyboardType(.decimalPad)
                     Text("ft")
                         .foregroundStyle(.secondary)
                 }
+
+                Button {
+                    showingDistanceCapture = true
+                } label: {
+                    Label("Measure with AR", systemImage: "camera.viewfinder")
+                }
+            } header: {
+                Text("Horizontal Distance")
+            } footer: {
+                Text("AR works within ~10 ft; farther, use a tape measure.")
             }
 
-            Section("Sight Base of Trunk") {
+            Section {
                 sightRow(
                     label: "Base angle",
                     lockedAngle: motion.baseAngle,
                     isActive: sightingBase == true
                 ) {
                     startSighting(base: true)
+                }
+            } header: {
+                Text("Sight Base of Trunk")
+            } footer: {
+                if sightingBase != nil || motion.baseAngle == nil {
+                    Text("Keep the iPad at the same spot and height for this and the top sighting.")
                 }
             }
 
@@ -141,6 +175,19 @@ struct HeightCaptureView: View {
         .onChange(of: motion.topAngle)  { _, _ in recalculate() }
         .onChange(of: distanceText)     { _, _ in recalculate() }
         .onDisappear { motion.stopSighting() }
+        .sheet(isPresented: $showingDistanceCapture) {
+            NavigationStack {
+                DistanceCaptureView { distanceFeet in
+                    distanceText = String(format: "%.1f", distanceFeet)
+                    showingDistanceCapture = false
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showingDistanceCapture = false }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Sight row
@@ -154,12 +201,47 @@ struct HeightCaptureView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if isActive {
+                let liveDegrees = motion.livePitch * 180 / .pi
+                let tooSteep = abs(liveDegrees) > 70
+                // tan() grows explosively as the angle approaches 90° — past
+                // ~80° even a tiny aiming error turns into a large height
+                // error, so this gets its own, more direct warning rather
+                // than just the orange tint.
+                let extremelySteep = abs(liveDegrees) > 80
+                let caption = label == "Base angle"
+                    ? "Line up the bar with where the trunk meets the ground"
+                    : "Line up the bar with the top of the crown"
+
+                // Live camera feed with a horizontal aim bar overlaid where
+                // the lens is pointed. The preview layer is kept correctly
+                // rotated for whichever way the iPad is held (portrait,
+                // landscape either direction, or upside-down), so the bar
+                // stays meaningful relative to the tree in frame no matter
+                // how the surveyor is holding the device.
+                ZStack {
+                    CameraPreviewView()
+                    AimBarOverlay(caption: caption, tooSteep: tooSteep)
+                }
+                .frame(height: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(.vertical, 4)
+
+                if extremelySteep {
+                    Text("Very steep angle — back up farther for an accurate reading.")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                } else if tooSteep {
+                    Text("Getting steep — more distance from the tree improves accuracy.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
                 // Live pitch display
                 HStack {
                     Image(systemName: "scope")
-                    Text(String(format: "Live: %.2f°", motion.livePitch * 180 / .pi))
+                    Text(String(format: "Live: %.2f°", liveDegrees))
                         .font(.body.monospacedDigit())
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(tooSteep ? .orange : .blue)
                     Spacer()
                     Button("Lock") {
                         let angle = motion.lockAngle()
@@ -172,6 +254,7 @@ struct HeightCaptureView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 }
+
             } else if let angle = lockedAngle {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")
@@ -206,10 +289,17 @@ struct HeightCaptureView: View {
             computedHeight = nil
             return
         }
-        // Both angles are device pitch (radians).
-        // Base angle is typically negative (looking down); top angle is positive (looking up).
-        // Formula works for both signs as long as we add the tangents.
-        let h = dist * (tan(topA) + tan(baseA))
+        // Both angles are signed device pitch (radians), positive = tilted up,
+        // negative = tilted down. Height = D * (tan(topAngle) - tan(baseAngle)):
+        // when the base is below eye level (the normal case), baseAngle is
+        // negative, so subtracting it ADDS the eye-height contribution.
+        // (The classic hypsometer formula "D*(tanα + tanβ)" uses two unsigned
+        // angles measured in opposite directions — that's equivalent to this
+        // once baseAngle's sign is accounted for. Using "+" directly on signed
+        // pitch values was the bug: it canceled out most or all of the eye-height
+        // term, which is why short trees with both angles negative came out
+        // near zero.)
+        let h = dist * (tan(topA) - tan(baseA))
         computedHeight = max(h, 0)  // clamp to ≥ 0 (guard against bad input)
         overrideText = String(format: "%.1f", max(h, 0))
     }
