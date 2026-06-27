@@ -18,11 +18,10 @@ struct ExportSettingsView: View {
 
     @State private var selectedProject: Project?
     @State private var showingAddProject = false
-    @State private var syncAlert: SyncAlert? = nil
+    @State private var activeAlert: AppAlert? = nil
     @State private var isSyncing = false
     @State private var isTestingConnection = false
     @State private var connectionStatus: ConnectionStatus = .unknown
-    @State private var exportAlert: ExportAlert? = nil
     @State private var shareItems: [Any] = []
     @State private var showingShareSheet = false
 
@@ -147,10 +146,7 @@ struct ExportSettingsView: View {
             }
             .onChange(of: supabaseURL) { _, _ in connectionStatus = .unknown }
             .onChange(of: supabaseAnonKey) { _, _ in connectionStatus = .unknown }
-            .alert(item: $syncAlert) { alert in
-                Alert(title: Text(alert.title), message: Text(alert.message))
-            }
-            .alert(item: $exportAlert) { alert in
+            .alert(item: $activeAlert) { alert in
                 Alert(title: Text(alert.title), message: Text(alert.message))
             }
         }
@@ -179,7 +175,7 @@ struct ExportSettingsView: View {
             shareItems = [url]
             showingShareSheet = true
         } catch {
-            exportAlert = ExportAlert(title: "Export Failed", message: error.localizedDescription)
+            activeAlert = AppAlert(title: "Export Failed", message: error.localizedDescription)
         }
     }
 
@@ -227,9 +223,9 @@ struct ExportSettingsView: View {
                 } else {
                     message = "Uploaded \(uploadedCount), failed \(failedCount). Try syncing again to retry the failed records."
                 }
-                syncAlert = SyncAlert(title: "Sync Complete", message: message)
+                activeAlert = AppAlert(title: "Sync Complete", message: message)
             } catch {
-                syncAlert = SyncAlert(title: "Sync Failed", message: error.localizedDescription)
+                activeAlert = AppAlert(title: "Sync Failed", message: error.localizedDescription)
             }
             isSyncing = false
         }
@@ -238,13 +234,7 @@ struct ExportSettingsView: View {
 
 // MARK: - Helpers
 
-struct ExportAlert: Identifiable {
-    let id = UUID()
-    let title: String
-    let message: String
-}
-
-struct SyncAlert: Identifiable {
+struct AppAlert: Identifiable {
     let id = UUID()
     let title: String
     let message: String

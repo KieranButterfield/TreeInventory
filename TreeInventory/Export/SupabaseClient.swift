@@ -118,7 +118,11 @@ actor SupabaseClient {
     /// reason on failure.
     func testConnection() async throws {
         guard config.isConfigured else { throw SupabaseError.notConfigured }
-        guard let url = restURL(path: "/") else { throw SupabaseError.invalidURL }
+        // Hit the projects table directly — the API root requires service_role
+        // in newer Supabase, while table endpoints respect RLS + anon key.
+        guard let url = restURL(path: "/projects", query: [
+            URLQueryItem(name: "limit", value: "1"),
+        ]) else { throw SupabaseError.invalidURL }
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
