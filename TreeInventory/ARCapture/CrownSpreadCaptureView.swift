@@ -310,8 +310,9 @@ final class SpreadCoordinator: NSObject {
             let distMetres = Double(simd_length(diff))
             // LiDAR mesh typically doesn't reach the outermost canopy edge,
             // so taps land slightly inside the true drip line. Empirically
-            // calibrated at 1.20 (20%) — adjust if field testing shows over/under.
-            let distFeet = distMetres * 3.28084 * 1.20
+            // calibrated at 1.45 (45%) based on two trees — adjust if field
+            // testing shows over/under.
+            let distFeet = distMetres * 3.28084 * 1.45
 
             placeMarker(at: pos, color: .systemOrange, spread: activeSpread)
             drawLine(from: a, to: pos, spread: activeSpread)
