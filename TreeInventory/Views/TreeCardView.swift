@@ -19,7 +19,7 @@ struct TreeCardView: View {
 
     private var heightText: String {
         if let h = record.heightFeet {
-            return String(format: "%.1f ft", h)
+            return formatFeetInches(h)
         }
         return "—"
     }

@@ -50,6 +50,7 @@ struct CaptureView: View {
     @State private var showingCamera = false
 
     @State private var location = LocationManager()
+    @State private var hasAppeared = false
 
     private let totalSteps = 4
 
@@ -140,7 +141,7 @@ struct CaptureView: View {
                     HeightCaptureView { result in
                         capturedResult.heightFeet = result.heightFeet
                         if let h = result.heightFeet {
-                            heightFeetText = String(format: "%.1f", h)
+                            heightFeetText = formatFeetInches(h)
                         }
                         showingHeightCapture = false
                     }
@@ -169,8 +170,8 @@ struct CaptureView: View {
                     CrownSpreadCaptureView { result in
                         capturedResult.spread1Feet = result.spread1Feet
                         capturedResult.spread2Feet = result.spread2Feet
-                        if let s1 = result.spread1Feet { spread1FeetText = String(format: "%.1f", s1) }
-                        if let s2 = result.spread2Feet { spread2FeetText = String(format: "%.1f", s2) }
+                        if let s1 = result.spread1Feet { spread1FeetText = formatFeetInches(s1) }
+                        if let s2 = result.spread2Feet { spread2FeetText = formatFeetInches(s2) }
                         showingCrownCapture = false
                     }
                     .toolbar {
@@ -198,11 +199,13 @@ struct CaptureView: View {
             .ignoresSafeArea()
         }
         .onChange(of: dbhInchesText) { _, newValue in
-            if let dbh = Double(newValue.trimmingCharacters(in: .whitespaces)) {
+            if let dbh = parseInches(newValue.trimmingCharacters(in: .whitespaces)) {
                 treeType = TreeRecord.derivedTreeType(fromDBH: dbh)
             }
         }
         .onAppear {
+            guard !hasAppeared else { return }
+            hasAppeared = true
             if let first = project.siteCodes.first { selectedSiteCode = first }
             surveyorName = defaultSurveyorName
             if defaultSurveyorName.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -276,7 +279,7 @@ struct CaptureView: View {
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: dbhInchesText) { _, newValue in
-                        if let d = Double(newValue.trimmingCharacters(in: .whitespaces)) {
+                        if let d = parseInches(newValue.trimmingCharacters(in: .whitespaces)) {
                             treeType = TreeRecord.derivedTreeType(fromDBH: d)
                         }
                     }
@@ -481,13 +484,13 @@ struct CaptureView: View {
 
     private func saveRecord() {
         // Prefer manual text entry (allows override of AR result); fall back to AR result
-        let dbhValue  = Double(dbhInchesText.trimmingCharacters(in: .whitespaces))
-                     ?? capturedResult.dbhInches
-        let heightValue = Double(heightFeetText.trimmingCharacters(in: .whitespaces))
-                       ?? capturedResult.heightFeet
-        let spread1Value = Double(spread1FeetText.trimmingCharacters(in: .whitespaces))
+        let dbhValue     = parseInches(dbhInchesText.trimmingCharacters(in: .whitespaces))
+                        ?? capturedResult.dbhInches
+        let heightValue  = parseFeet(heightFeetText.trimmingCharacters(in: .whitespaces))
+                        ?? capturedResult.heightFeet
+        let spread1Value = parseFeet(spread1FeetText.trimmingCharacters(in: .whitespaces))
                         ?? capturedResult.spread1Feet
-        let spread2Value = Double(spread2FeetText.trimmingCharacters(in: .whitespaces))
+        let spread2Value = parseFeet(spread2FeetText.trimmingCharacters(in: .whitespaces))
                         ?? capturedResult.spread2Feet
 
         // treeType is kept in sync with DBH (manual entry above, AR result on capture)

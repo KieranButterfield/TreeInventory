@@ -86,7 +86,7 @@ struct DistanceCaptureView: View {
     }
 
     private var instructionBanner: some View {
-        Text("Tap the base of the trunk")
+        Text("Tap the ground directly at the base of the trunk")
             .font(.headline)
             .foregroundStyle(.white)
             .multilineTextAlignment(.center)
@@ -106,7 +106,7 @@ struct DistanceCaptureView: View {
                 Label("Horizontal Distance", systemImage: "arrow.left.and.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(String(format: "%.1f ft", distanceFeet))
+                Text(formatFeetInches(distanceFeet))
                     .font(.title2.monospacedDigit().bold())
             }
 
@@ -195,11 +195,19 @@ private final class DistanceCoordinator: NSObject {
         guard let sceneView else { return }
         let location = gesture.location(in: sceneView)
 
-        // Existing plane geometry first, then a genuine fallback to
-        // estimated-plane (depth-based) raycasting — same pattern as the
-        // DBH tool, since the trunk base may not register as a flat plane.
+        // Prefer horizontal plane hits (ground) for stable ground-level
+        // distance — they give more consistent XZ positions than hitting
+        // the trunk face, which varies by tap angle and trunk curvature.
+        // Fall through to any-alignment and then estimated-plane if no
+        // horizontal plane is found yet.
         var hitResult: ARRaycastResult? = nil
-        if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
+        if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .horizontal) {
+            hitResult = sceneView.session.raycast(query).first
+        }
+        if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
+            hitResult = sceneView.session.raycast(query).first
+        }
+        if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .horizontal) {
             hitResult = sceneView.session.raycast(query).first
         }
         if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) {

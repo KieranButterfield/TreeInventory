@@ -30,30 +30,23 @@ import Foundation
 // MARK: - SwiftUI wrapper
 
 /// Drop-in SwiftUI view that presents a live ARKit scene with LiDAR mesh capture.
-/// The user taps on the trunk at breast height; the coordinator slices the mesh
-/// and fits a circle to estimate circumference.
+/// The coordinator auto-detects the trunk at 4'4" breast height once it finds a
+/// stable circle fit. The user can also tap manually as a fallback.
 struct ARViewContainer: UIViewRepresentable {
 
-    /// Called on the main actor when a valid circle fit is found.
-    /// - Parameters:
-    ///   - circumferenceInches: Trunk circumference in inches.
-    ///   - pointCloudSliceRef: Path to a temp JSON file containing the [x, z] vertex slice.
-    ///   - lowConfidence: True if the mesh only covered a narrow arc of the
-    ///     trunk (the surveyor didn't pan around it before tapping) — the
-    ///     fit is still returned, but it's more likely to read low.
     var onResult: (Double, String?, Bool) -> Void
-
-    /// Called on the main actor whenever a tap does NOT produce a measurement,
-    /// with a short human-readable reason. Lets the SwiftUI layer show an
-    /// on-screen hint instead of the surveyor tapping blindly with no feedback.
     var onTapFailed: (String) -> Void = { _ in }
-
-    /// Called whenever the surveyor pinch-adjusts the ring, with the updated
-    /// circumference in inches. Use this to keep the confirm panel in sync.
     var onCircumferenceUpdate: (Double) -> Void = { _ in }
+    /// Called once the coordinator is ready — lets the parent view hold a
+    /// reference so it can call resetForRetake() when the surveyor taps Retake.
+    var onCoordinatorReady: (ARSCNCoordinator) -> Void = { _ in }
 
     func makeCoordinator() -> ARSCNCoordinator {
-        ARSCNCoordinator(onResult: onResult, onTapFailed: onTapFailed, onCircumferenceUpdate: onCircumferenceUpdate)
+        ARSCNCoordinator(
+            onResult: onResult,
+            onTapFailed: onTapFailed,
+            onCircumferenceUpdate: onCircumferenceUpdate
+        )
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -62,14 +55,12 @@ struct ARViewContainer: UIViewRepresentable {
         sceneView.autoenablesDefaultLighting = true
         sceneView.automaticallyUpdatesLighting = true
 
-        // Tap gesture
         let tap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(ARSCNCoordinator.handleTap(_:))
         )
         sceneView.addGestureRecognizer(tap)
 
-        // Pinch gesture — resizes the torus ring after a fit is shown
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
             action: #selector(ARSCNCoordinator.handlePinch(_:))
@@ -78,6 +69,7 @@ struct ARViewContainer: UIViewRepresentable {
 
         context.coordinator.sceneView = sceneView
         context.coordinator.startSession()
+        onCoordinatorReady(context.coordinator)
 
         return sceneView
     }
@@ -101,13 +93,24 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
     private let onTapFailed: (String) -> Void
     private let onCircumferenceUpdate: (Double) -> Void
 
-    /// Overlay nodes so we can remove them on the next tap.
     private var overlayNodes: [SCNNode] = []
-
-    /// Live references to the current ring and label so pinch can adjust them.
     private var activeTorus: SCNTorus?
     private var activeLabelGeom: SCNText?
     private var pendingRadius: Float = 0
+
+    // MARK: Auto-scan
+
+    /// Measurement height in metres. Default is 4'4" (1.3208 m) for standard DBH.
+    /// Set to 0.1524 m (6") for sub-breast-height trees via setMeasurementHeight(_:).
+    private var measurementHeightMeters: Float = 1.3208
+
+    private var autoTimer: Timer?
+    private var recentFitRadii: [Float] = []
+    /// Suppresses the auto-scan timer once a result is delivered. Reset by
+    /// resetForRetake() when the surveyor taps the Retake button.
+    private var isLocked = false
+    private let stabilityCount = 4         // consecutive stable fits required
+    private let stabilityCV: Float = 0.06  // max coefficient of variation
 
     // MARK: Init
 
@@ -128,142 +131,198 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
             print("[ARCapture] Device does not support LiDAR scene reconstruction.")
             return
         }
-
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = .meshWithClassification
         config.environmentTexturing = .automatic
         config.planeDetection = [.horizontal, .vertical]
         sceneView?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        startAutoScan()
     }
 
     func stopSession() {
+        stopAutoScan()
         sceneView?.session.pause()
     }
 
-    // MARK: - Tap handling
+    /// Switches between standard (4'4") and low (6") measurement height and restarts the scan.
+    func setMeasurementHeight(_ meters: Float) {
+        measurementHeightMeters = meters
+        resetForRetake()
+    }
+
+    /// Clears the ring and restarts auto-scanning. Call when the surveyor taps Retake.
+    func resetForRetake() {
+        isLocked = false
+        recentFitRadii.removeAll()
+        removeOverlays()
+        startAutoScan()
+    }
+
+    // MARK: - Auto-scan
+
+    private func startAutoScan() {
+        stopAutoScan()
+        autoTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.tryAutoFit() }
+        }
+    }
+
+    private func stopAutoScan() {
+        autoTimer?.invalidate()
+        autoTimer = nil
+    }
+
+    private func tryAutoFit() {
+        guard !isLocked, let sceneView else { return }
+
+        // Raycast from the screen centre to find the trunk's XZ position.
+        let centre = CGPoint(x: sceneView.bounds.midX, y: sceneView.bounds.midY)
+        var hit: ARRaycastResult?
+        if let q = sceneView.raycastQuery(from: centre, allowing: .existingPlaneGeometry, alignment: .any) {
+            hit = sceneView.session.raycast(q).first
+        }
+        if hit == nil,
+           let q = sceneView.raycastQuery(from: centre, allowing: .estimatedPlane, alignment: .any) {
+            hit = sceneView.session.raycast(q).first
+        }
+        guard let result = hit else { recentFitRadii.removeAll(); return }
+
+        let col = result.worldTransform.columns.3
+        // Use detected ground + 4'4" if available; fall back to hit Y (user must
+        // hold device at breast height in that case).
+        let sliceY = breastHeightWorldY() ?? col.y
+
+        let points = collectSlicePoints(centerX: col.x, sliceY: sliceY, centerZ: col.z)
+        guard points.count >= 8, let fit = KasaFit.fit(points: points) else {
+            recentFitRadii.removeAll()
+            return
+        }
+
+        recentFitRadii.append(fit.radius)
+        if recentFitRadii.count > stabilityCount { recentFitRadii.removeFirst() }
+        guard recentFitRadii.count >= stabilityCount else { return }
+
+        let mean = recentFitRadii.reduce(0, +) / Float(recentFitRadii.count)
+        let sd   = sqrt(recentFitRadii.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(recentFitRadii.count))
+        guard sd / mean < stabilityCV else { return }
+
+        // Stable — lock and deliver.
+        deliverResult(cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: mean)
+    }
+
+    // MARK: - Manual tap (fallback / override)
 
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-        guard let sceneView = sceneView else { return }
+        guard !isLocked, let sceneView else { return }
         let location = gesture.location(in: sceneView)
 
-        // Raycast against existing plane geometry first, then genuinely fall back
-        // to estimated-plane (depth-based) raycasting if that produces no hits —
-        // trunks are curved, not planar, so estimated-plane is the one that
-        // actually matters here.
-        var hitResult: ARRaycastResult? = nil
-        if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
-            hitResult = sceneView.session.raycast(query).first
+        var hit: ARRaycastResult?
+        if let q = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
+            hit = sceneView.session.raycast(q).first
         }
-        if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) {
-            hitResult = sceneView.session.raycast(query).first
+        if hit == nil,
+           let q = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) {
+            hit = sceneView.session.raycast(q).first
         }
 
-        guard let result = hitResult else {
-            print("[ARCapture] Raycast returned no result.")
+        guard let result = hit else {
             onTapFailed("No surface detected there. Move slightly closer, make sure the trunk is well lit, and pan the iPad across it for a second before tapping.")
             return
         }
 
-        let hitWorldPos = result.worldTransform.columns.3  // SIMD4
-        let hitY = hitWorldPos.y
-
-        // Slice parameters
-        let yTolerance: Float  = 0.02   // ±2 cm vertical band
-        let hRadiusLimit: Float = 0.40  // 40 cm horizontal radius
-
-        // Collect mesh vertices within the slice.
-        var slicePoints: [(x: Float, z: Float)] = []
-
-        guard let frame = sceneView.session.currentFrame else {
+        guard sceneView.session.currentFrame != nil else {
             onTapFailed("Tracking isn't ready yet. Wait a moment and try again.")
             return
         }
 
-        for anchor in frame.anchors {
-            guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-            let geometry = meshAnchor.geometry
-            let transform = meshAnchor.transform
+        let col = result.worldTransform.columns.3
+        let sliceY = breastHeightWorldY() ?? col.y
+        let points = collectSlicePoints(centerX: col.x, sliceY: sliceY, centerZ: col.z)
 
-            let vertices = geometry.vertices
-            let vertexBuffer = vertices.buffer
-            let vertexStride = vertices.stride
-            let vertexOffset = vertices.offset
+        print("[ARCapture] Manual tap — \(points.count) points at y=\(String(format: "%.2f", sliceY)) m\(breastHeightWorldY() != nil ? " (ground detected)" : " (camera height)")")
 
-            let vertexCount = vertices.count
-            let rawPtr = vertexBuffer.contents()
-
-            for i in 0 ..< vertexCount {
-                let ptr = rawPtr
-                    .advanced(by: vertexOffset + i * vertexStride)
-                    .assumingMemoryBound(to: SIMD3<Float>.self)
-                let localPos = ptr.pointee
-
-                // Transform vertex into world space.
-                let worldPos4 = transform * SIMD4<Float>(localPos.x, localPos.y, localPos.z, 1)
-                let wx = worldPos4.x
-                let wy = worldPos4.y
-                let wz = worldPos4.z
-
-                // Vertical slice filter.
-                guard abs(wy - hitY) <= yTolerance else { continue }
-
-                // Horizontal radius filter.
-                let dx = wx - hitWorldPos.x
-                let dz = wz - hitWorldPos.z
-                guard sqrt(dx * dx + dz * dz) <= hRadiusLimit else { continue }
-
-                slicePoints.append((x: wx, z: wz))
-            }
-        }
-
-        print("[ARCapture] Collected \(slicePoints.count) slice vertices.")
-
-        guard let fit = KasaFit.fit(points: slicePoints) else {
-            print("[ARCapture] Kasa fit failed — not enough points or degenerate system.")
-            onTapFailed("Found the surface but couldn't get a clean measurement (only \(slicePoints.count) points). Try tapping a flatter, more visible section of trunk, a bit further back.")
+        guard let fit = KasaFit.fit(points: points) else {
+            onTapFailed("Found the surface but couldn't get a clean measurement (\(points.count) points). Try tapping a flatter section of trunk, or back up slightly and pan around it first.")
             return
         }
 
-        let circumferenceInches = KasaFit.circumferenceInches(fit.radius)
-        let sliceRef = writeSliceJSON(slicePoints)
+        deliverResult(cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: fit.radius)
+    }
 
-        // A single tap can only "see" the front-facing arc of the trunk —
-        // the back side is occluded by the trunk's own curvature — so the
-        // circle is always being inferred from less than a full revolution
-        // of points. The narrower that arc, the more the fit leans on
-        // extrapolation rather than measurement, which is where circle
-        // fitting is most prone to reading the true size low. Surface that
-        // as a confidence signal rather than silently reporting a number
-        // that may be running small.
-        let coverageDegrees = angularCoverageDegrees(of: slicePoints, aroundCenter: (fit.cx, fit.cz))
-        let lowConfidence = coverageDegrees < 110
-        print("[ARCapture] Arc coverage: \(Int(coverageDegrees))°\(lowConfidence ? " (low confidence)" : "")")
+    private func deliverResult(cx: Float, cz: Float, sliceY: Float, points: [(x: Float, z: Float)], radius: Float) {
+        isLocked = true
+        stopAutoScan()
 
-        // Draw AR overlay and deliver result on main actor (already here).
+        let circumferenceInches = KasaFit.circumferenceInches(radius)
+        let sliceRef = writeSliceJSON(points)
+        let coverage = angularCoverageDegrees(of: points, aroundCenter: (cx, cz))
+        let lowConfidence = coverage < 110
+
+        print("[ARCapture] Result: radius=\(String(format: "%.3f", radius))m circ=\(Int(circumferenceInches))\" arc=\(Int(coverage))°")
+
         removeOverlays()
-        addCircleOverlay(center: SIMD3(fit.cx, hitY, fit.cz), radius: fit.radius)
+        addCircleOverlay(center: SIMD3(cx, sliceY, cz), radius: radius)
         addLabelOverlay(
             text: String(format: "%.1f\" circ.", circumferenceInches),
-            position: SIMD3(fit.cx, hitY + 0.15, fit.cz)
+            position: SIMD3(cx, sliceY + 0.15, cz)
         )
-
         onResult(circumferenceInches, sliceRef, lowConfidence)
     }
 
-    /// How much of the circle (0–360°) the slice points actually span around
-    /// the fitted center, found by sorting the points' angles and measuring
-    /// the largest gap between consecutive ones — that gap is the unseen
-    /// (occluded) portion of the trunk, so coverage is everything else.
+    // MARK: - Helpers
+
+    /// World Y of 4'4" above the largest detected horizontal ground plane.
+    /// Returns nil if no horizontal plane has been found yet (e.g. just started scanning).
+    /// Ceiling planes are excluded by requiring the plane to be below the camera.
+    private func breastHeightWorldY() -> Float? {
+        guard let frame = sceneView?.session.currentFrame else { return nil }
+        let cameraY = frame.camera.transform.columns.3.y
+        let groundAnchors = frame.anchors
+            .compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal }
+            .filter { $0.transform.columns.3.y < cameraY - 0.3 }  // exclude ceiling/waist-height planes
+        guard !groundAnchors.isEmpty else { return nil }
+        // Largest horizontal plane is the most reliably detected ground surface.
+        let ground = groundAnchors.max(by: {
+            ($0.planeExtent.width * $0.planeExtent.height) < ($1.planeExtent.width * $1.planeExtent.height)
+        })!
+        return ground.transform.columns.3.y + measurementHeightMeters
+    }
+
+    /// Collects LiDAR mesh vertices within ±2 cm of sliceY and within 40 cm
+    /// horizontal radius of (centerX, centerZ).
+    private func collectSlicePoints(centerX: Float, sliceY: Float, centerZ: Float) -> [(x: Float, z: Float)] {
+        guard let frame = sceneView?.session.currentFrame else { return [] }
+        let yTol: Float   = 0.02
+        let hRadius: Float = 0.40
+        var pts: [(x: Float, z: Float)] = []
+        for anchor in frame.anchors {
+            guard let mesh = anchor as? ARMeshAnchor else { continue }
+            let verts = mesh.geometry.vertices
+            let raw   = verts.buffer.contents()
+            for i in 0..<verts.count {
+                let ptr = raw
+                    .advanced(by: verts.offset + i * verts.stride)
+                    .assumingMemoryBound(to: SIMD3<Float>.self)
+                let w = mesh.transform * SIMD4<Float>(ptr.pointee.x, ptr.pointee.y, ptr.pointee.z, 1)
+                guard abs(w.y - sliceY) <= yTol else { continue }
+                let dx = w.x - centerX, dz = w.z - centerZ
+                guard dx*dx + dz*dz <= hRadius*hRadius else { continue }
+                pts.append((x: w.x, z: w.z))
+            }
+        }
+        return pts
+    }
+
     private func angularCoverageDegrees(of points: [(x: Float, z: Float)], aroundCenter center: (Float, Float)) -> Float {
         guard points.count >= 2 else { return 0 }
         let angles = points.map { atan2($0.z - center.1, $0.x - center.0) }.sorted()
         var maxGap: Float = 0
-        for i in 0 ..< angles.count {
-            let next = (i + 1 < angles.count) ? angles[i + 1] : angles[0] + 2 * Float.pi
+        for i in 0..<angles.count {
+            let next = i + 1 < angles.count ? angles[i + 1] : angles[0] + 2 * Float.pi
             maxGap = max(maxGap, next - angles[i])
         }
-        let coverage = (2 * Float.pi) - maxGap
-        return coverage * 180 / .pi
+        return ((2 * Float.pi) - maxGap) * 180 / .pi
     }
 
     // MARK: - AR overlays
@@ -277,28 +336,22 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
     }
 
     private func addCircleOverlay(center: SIMD3<Float>, radius: Float) {
-        guard let sceneView = sceneView else { return }
-
+        guard let sceneView else { return }
         pendingRadius = radius
-        // SCNTorus: ring radius = fit radius, pipe radius = thin visual tube.
         let torus = SCNTorus(ringRadius: CGFloat(radius), pipeRadius: CGFloat(max(radius * 0.03, 0.005)))
         activeTorus = torus
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor.systemGreen.withAlphaComponent(0.85)
-        material.isDoubleSided = true
-        torus.materials = [material]
-
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.systemGreen.withAlphaComponent(0.85)
+        mat.isDoubleSided = true
+        torus.materials = [mat]
         let node = SCNNode(geometry: torus)
         node.position = SCNVector3(center.x, center.y, center.z)
-        // SCNTorus lies in the XZ plane by default — no rotation needed.
-
         sceneView.scene.rootNode.addChildNode(node)
         overlayNodes.append(node)
     }
 
     private func addLabelOverlay(text: String, position: SIMD3<Float>) {
-        guard let sceneView = sceneView else { return }
-
+        guard let sceneView else { return }
         let textGeom = SCNText(string: text, extrusionDepth: 0.001)
         activeLabelGeom = textGeom
         textGeom.font = UIFont.boldSystemFont(ofSize: 0.05)
@@ -306,43 +359,28 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
         let mat = SCNMaterial()
         mat.diffuse.contents = UIColor.white
         textGeom.materials = [mat]
-
-        let textNode = SCNNode(geometry: textGeom)
-
-        // Center the text pivot.
-        let (min, max) = textNode.boundingBox
-        let cx = (max.x - min.x) / 2
-        let cz = (max.z - min.z) / 2
-        textNode.pivot = SCNMatrix4MakeTranslation(cx, 0, cz)
-
-        // Billboard so it always faces the camera.
+        let node = SCNNode(geometry: textGeom)
+        let (mn, mx) = node.boundingBox
+        node.pivot = SCNMatrix4MakeTranslation((mx.x - mn.x) / 2, 0, (mx.z - mn.z) / 2)
         let constraint = SCNBillboardConstraint()
         constraint.freeAxes = .all
-        textNode.constraints = [constraint]
-
-        textNode.position = SCNVector3(position.x, position.y, position.z)
-        textNode.scale = SCNVector3(1, 1, 1)
-
-        sceneView.scene.rootNode.addChildNode(textNode)
-        overlayNodes.append(textNode)
+        node.constraints = [constraint]
+        node.position = SCNVector3(position.x, position.y, position.z)
+        sceneView.scene.rootNode.addChildNode(node)
+        overlayNodes.append(node)
     }
 
     // MARK: - Pinch to adjust ring
 
-    /// Resizes the torus ring after a fit has been shown, letting the surveyor
-    /// visually match it to the trunk before confirming the measurement.
     @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
         guard gesture.state == .changed,
               let torus = activeTorus,
               pendingRadius > 0
         else { return }
-
         pendingRadius = max(pendingRadius * Float(gesture.scale), 0.01)
-        gesture.scale = 1.0   // reset so each event delivers a delta, not cumulative
-
+        gesture.scale = 1.0
         torus.ringRadius = CGFloat(pendingRadius)
         torus.pipeRadius = CGFloat(max(pendingRadius * 0.03, 0.005))
-
         let newCirc = KasaFit.circumferenceInches(pendingRadius)
         activeLabelGeom?.string = String(format: "%.1f\" circ.", newCirc)
         onCircumferenceUpdate(newCirc)
@@ -350,14 +388,12 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
 
     // MARK: - Slice JSON persistence
 
-    /// Writes the slice point array to a temp file and returns the path.
     private func writeSliceJSON(_ points: [(x: Float, z: Float)]) -> String? {
         let payload = points.map { [Double($0.x), Double($0.z)] }
         guard
             let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
-            let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            let dir  = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         else { return nil }
-
         let url = dir.appendingPathComponent("lidar_slice_\(Date().timeIntervalSince1970).json")
         try? data.write(to: url)
         return url.path
@@ -366,6 +402,6 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
     // MARK: - ARSCNViewDelegate
 
     nonisolated func renderer(_ renderer: any SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-        nil   // We don't visualise the raw mesh; we only tap into it for data.
+        nil
     }
 }

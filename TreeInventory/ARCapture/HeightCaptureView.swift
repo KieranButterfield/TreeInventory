@@ -91,7 +91,7 @@ struct HeightCaptureView: View {
     // MARK: - Derived
 
     private var distanceFeet: Double? {
-        Double(distanceText)
+        parseFeet(distanceText)
     }
 
     // MARK: - Body
@@ -100,8 +100,8 @@ struct HeightCaptureView: View {
         Form {
             Section {
                 HStack {
-                    TextField("Distance (feet)", text: $distanceText)
-                        .keyboardType(.decimalPad)
+                    TextField("e.g. 9'8\", 9.7 ft, 116 in", text: $distanceText)
+                        .keyboardType(.default)
                     Text("ft")
                         .foregroundStyle(.secondary)
                 }
@@ -146,23 +146,19 @@ struct HeightCaptureView: View {
             if let computedHeight {
                 Section("Computed Height") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(String(format: "%.1f ft", computedHeight))
+                        Text(formatFeetInches(computedHeight))
                             .font(.title2.monospacedDigit().bold())
 
                         Text("Override if needed:")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        HStack {
-                            TextField("Height (feet)", text: $overrideText)
-                                .keyboardType(.decimalPad)
-                            Text("ft")
-                                .foregroundStyle(.secondary)
-                        }
+                        TextField("e.g. 6'10\", 6.8 ft, 82 in", text: $overrideText)
+                            .keyboardType(.default)
                     }
 
                     Button("Use This Height") {
-                        let finalHeight = Double(overrideText) ?? computedHeight
+                        let finalHeight = parseFeet(overrideText) ?? computedHeight
                         onComplete(CaptureResult(heightFeet: finalHeight))
                     }
                     .buttonStyle(.borderedProminent)
@@ -178,7 +174,7 @@ struct HeightCaptureView: View {
         .sheet(isPresented: $showingDistanceCapture) {
             NavigationStack {
                 DistanceCaptureView { distanceFeet in
-                    distanceText = String(format: "%.1f", distanceFeet)
+                    distanceText = formatFeetInches(distanceFeet)
                     showingDistanceCapture = false
                 }
                 .toolbar {
@@ -301,6 +297,6 @@ struct HeightCaptureView: View {
         // near zero.)
         let h = dist * (tan(topA) - tan(baseA))
         computedHeight = max(h, 0)  // clamp to ≥ 0 (guard against bad input)
-        overrideText = String(format: "%.1f", max(h, 0))
+        overrideText = formatFeetInches(max(h, 0))
     }
 }

@@ -118,7 +118,7 @@ struct TreeDetailView: View {
                     Divider()
                     MeasurementRow(
                         label: "Height",
-                        value: record.heightFeet.map { String(format: "%.1f ft", $0) } ?? "—",
+                        value: record.heightFeet.map { formatFeetInches($0) } ?? "—",
                         progress: heightProgress
                     )
                     Divider()
@@ -369,9 +369,9 @@ struct TreeDetailView: View {
 
     private var spreadDisplayValue: String {
         guard record.spread1Feet != nil || record.spread2Feet != nil else { return "—" }
-        let s1 = record.spread1Feet.map { String(format: "%.1f", $0) } ?? "—"
-        let s2 = record.spread2Feet.map { String(format: "%.1f", $0) } ?? "—"
-        return "\(s1) × \(s2) ft"
+        let s1 = record.spread1Feet.map { formatFeetInches($0) } ?? "—"
+        let s2 = record.spread2Feet.map { formatFeetInches($0) } ?? "—"
+        return "\(s1) × \(s2)"
     }
 
     private func deleteTree() {
@@ -399,9 +399,9 @@ struct TreeDetailView: View {
         editSiteCode = record.siteCode
         editSurveyorName = record.surveyorName
         editDbhText = record.dbhInches.map { String(format: "%.2f", $0) } ?? ""
-        editHeightText = record.heightFeet.map { String(format: "%.2f", $0) } ?? ""
-        editSpread1Text = record.spread1Feet.map { String(format: "%.2f", $0) } ?? ""
-        editSpread2Text = record.spread2Feet.map { String(format: "%.2f", $0) } ?? ""
+        editHeightText = record.heightFeet.map { formatFeetInches($0) } ?? ""
+        editSpread1Text = record.spread1Feet.map { formatFeetInches($0) } ?? ""
+        editSpread2Text = record.spread2Feet.map { formatFeetInches($0) } ?? ""
         editPhotoFilename = record.photoURL
     }
 
@@ -414,10 +414,10 @@ struct TreeDetailView: View {
         record.notes = editNotes.trimmingCharacters(in: .whitespaces)
         record.siteCode = editSiteCode.trimmingCharacters(in: .whitespaces)
         record.surveyorName = editSurveyorName.trimmingCharacters(in: .whitespaces)
-        record.dbhInches = Double(editDbhText.trimmingCharacters(in: .whitespaces))
-        record.heightFeet = Double(editHeightText.trimmingCharacters(in: .whitespaces))
-        record.spread1Feet = Double(editSpread1Text.trimmingCharacters(in: .whitespaces))
-        record.spread2Feet = Double(editSpread2Text.trimmingCharacters(in: .whitespaces))
+        record.dbhInches = parseInches(editDbhText.trimmingCharacters(in: .whitespaces))
+        record.heightFeet = parseFeet(editHeightText.trimmingCharacters(in: .whitespaces))
+        record.spread1Feet = parseFeet(editSpread1Text.trimmingCharacters(in: .whitespaces))
+        record.spread2Feet = parseFeet(editSpread2Text.trimmingCharacters(in: .whitespaces))
         record.photoURL = editPhotoFilename
         try? modelContext.save()
     }

@@ -25,6 +25,8 @@ struct DBHCaptureView: View {
     @State private var showConfirm = false
     @State private var tapHint: String? = nil
     @State private var hintDismissTask: Task<Void, Never>? = nil
+    @State private var arCoordinator: ARSCNCoordinator? = nil
+    @State private var useLowHeight = false   // false = 4'4" standard, true = 6" low
 
     // MARK: - Body
 
@@ -44,6 +46,9 @@ struct DBHCaptureView: View {
                 },
                 onCircumferenceUpdate: { newCircumference in
                     pendingCircumferenceInches = newCircumference
+                },
+                onCoordinatorReady: { coordinator in
+                    arCoordinator = coordinator
                 }
             )
             .ignoresSafeArea()
@@ -51,6 +56,17 @@ struct DBHCaptureView: View {
             VStack(spacing: 0) {
                 // Instruction banner
                 instructionBanner
+
+                // Height picker — only shown before a result is locked in
+                if !showConfirm {
+                    Picker("Measurement height", selection: $useLowHeight) {
+                        Text("Standard (4'4\")").tag(false)
+                        Text("Short tree (6\")").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                }
 
                 if let tapHint {
                     tapHintBanner(tapHint)
@@ -65,6 +81,9 @@ struct DBHCaptureView: View {
             }
             .animation(.easeInOut(duration: 0.3), value: showConfirm)
             .animation(.easeInOut(duration: 0.2), value: tapHint)
+            .onChange(of: useLowHeight) { _, low in
+                arCoordinator?.setMeasurementHeight(low ? 0.1524 : 1.3208)
+            }
         }
     }
 
@@ -95,18 +114,35 @@ struct DBHCaptureView: View {
 
     // MARK: - Sub-views
 
+    @ViewBuilder
     private var instructionBanner: some View {
-        Text(showConfirm
-             ? "Pinch the ring to adjust the fit, then confirm"
-             : "Slowly pan across the trunk at breast height for a couple seconds, then tap it")
-            .font(.headline)
+        if showConfirm {
+            Text("Pinch the ring to adjust, then confirm")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.top, 16)
+                .frame(maxWidth: .infinity)
+        } else {
+            VStack(spacing: 4) {
+                Text("Point camera at the trunk — ring appears automatically at 4'4\"")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                Text("Stand 3–6 ft away, trunk centred in frame. Switch to 6\" below if the tree is shorter than 4'4\". Tap to take a reading.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             .foregroundStyle(.white)
-            .multilineTextAlignment(.center)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .padding(.top, 16)
-        .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .padding(.top, 16)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     @ViewBuilder
@@ -115,6 +151,14 @@ struct DBHCaptureView: View {
 
         VStack(spacing: 12) {
             Divider()
+
+            if useLowHeight {
+                Label("Measured at 6\" — not a standard DBH. Mark tree as Newly Planted on the details step.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal)
+            }
 
             if pendingLowConfidence {
                 Label("Limited trunk view — this reading may run small. Retake and pan farther around the trunk first.", systemImage: "exclamationmark.triangle.fill")
@@ -148,6 +192,7 @@ struct DBHCaptureView: View {
 
             HStack(spacing: 12) {
                 Button("Retake") {
+                    arCoordinator?.resetForRetake()
                     showConfirm = false
                     pendingCircumferenceInches = nil
                     pendingSliceRef = nil

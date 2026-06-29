@@ -144,7 +144,7 @@ struct CrownSpreadCaptureView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let v = value {
-                Text(String(format: "%.1f ft", v))
+                Text(formatFeetInches(v))
                     .font(.title3.monospacedDigit().bold())
                 Button("Redo", action: onRedo)
                     .font(.caption2)
@@ -185,6 +185,14 @@ private struct SpreadARContainer: UIViewRepresentable {
         )
         view.addGestureRecognizer(tap)
 
+        let pan = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(SpreadCoordinator.handlePan(_:))
+        )
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        view.addGestureRecognizer(pan)
+
         context.coordinator.sceneView = view
         context.coordinator.startSession()
         onCoordinatorReady(context.coordinator)
@@ -205,30 +213,39 @@ final class SpreadCoordinator: NSObject {
 
     weak var sceneView: ARSCNView?
 
-    // Bindings back to SwiftUI
     private var spread1Binding: Binding<Double?>
     private var spread2Binding: Binding<Double?>
     private let onTapFailed: (String) -> Void
 
-    /// Which spread the next pair of taps fills in. 0 means both are done
-    /// and no redo is in progress (taps are ignored until Redo is tapped).
+    /// Which spread the next pair of taps fills in. 0 = both done, taps ignored.
     private var activeSpread: Int = 1
+    /// Ephemeral first-tap position while waiting for the second tap.
     private var pointA: SIMD3<Float>? = nil
-    /// Distance from the camera to pointA, used to sanity-check point B.
     private var pointADistance: Float? = nil
 
-    // Visual anchor nodes, tracked per spread so a redo only clears that
-    // spread's markers/line.
-    private var spread1Nodes: [SCNNode] = []
-    private var spread2Nodes: [SCNNode] = []
+    // Named marker nodes — one per endpoint so drag can reference them directly.
+    private var spread1MarkerA: SCNNode? = nil   // blue dot, spread 1
+    private var spread1MarkerB: SCNNode? = nil   // orange dot, spread 1
+    private var spread2MarkerA: SCNNode? = nil
+    private var spread2MarkerB: SCNNode? = nil
 
-    /// Raycast hits farther than this from the camera are rejected outright —
-    /// catches taps that "jumped" through a canopy gap onto the ground or a
-    /// tree far behind the subject tree.
-    private let maxPlausibleDistance: Float = 15.0   // meters (~49 ft)
-    /// If point B's distance from the camera differs from point A's by more
-    /// than this, it likely landed on a different object than point A did.
-    private let maxPairDistanceDelta: Float = 6.0    // meters (~20 ft)
+    // Line nodes kept separately so drag can replace them without touching markers.
+    private var spread1LineNode: SCNNode? = nil
+    private var spread2LineNode: SCNNode? = nil
+
+    // World positions retained so the line can be redrawn when a dot is dragged.
+    private var spread1A: SIMD3<Float>? = nil
+    private var spread1B: SIMD3<Float>? = nil
+    private var spread2A: SIMD3<Float>? = nil
+    private var spread2B: SIMD3<Float>? = nil
+
+    // Drag state
+    private var draggingNode: SCNNode? = nil
+    private var draggingIsA: Bool = false
+    private var draggingSpread: Int = 0
+
+    private let maxPlausibleDistance: Float = 15.0
+    private let maxPairDistanceDelta: Float = 6.0
 
     init(spread1Binding: Binding<Double?>, spread2Binding: Binding<Double?>, onTapFailed: @escaping (String) -> Void = { _ in }) {
         self.spread1Binding = spread1Binding
@@ -238,7 +255,6 @@ final class SpreadCoordinator: NSObject {
 
     func startSession() {
         let config = ARWorldTrackingConfiguration()
-        // Plane detection helps with floor / ground raycasting.
         config.planeDetection = [.horizontal, .vertical]
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
@@ -250,25 +266,27 @@ final class SpreadCoordinator: NSObject {
         sceneView?.session.pause()
     }
 
-    /// Restarts capture for one spread (1 or 2) without disturbing the other.
     func redo(spread: Int) {
         guard spread == 1 || spread == 2 else { return }
         clearNodes(for: spread)
         if spread == 1 {
             spread1Binding.wrappedValue = nil
+            spread1A = nil; spread1B = nil
         } else {
             spread2Binding.wrappedValue = nil
+            spread2A = nil; spread2B = nil
         }
         pointA = nil
         pointADistance = nil
         activeSpread = spread
     }
 
+    // MARK: - Tap handling
+
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
         guard activeSpread != 0, let sceneView else { return }
         let location = gesture.location(in: sceneView)
 
-        // Try mesh raycast first, fall back to estimated plane.
         var hitResult: ARRaycastResult? = nil
         if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
             hitResult = sceneView.session.raycast(query).first
@@ -284,25 +302,28 @@ final class SpreadCoordinator: NSObject {
             return
         }
 
+        // Reject hits on vertical planes (walls, fences) — canopy edges in open
+        // space should never hit a purely vertical surface.
+        if result.targetAlignment == .vertical {
+            onTapFailed("That hit a wall — try tapping the canopy edge from a different angle.")
+            return
+        }
+
         let col = result.worldTransform.columns.3
         let pos = SIMD3<Float>(col.x, col.y, col.z)
         let camCol = cameraTransform.columns.3
         let camPos = SIMD3<Float>(camCol.x, camCol.y, camCol.z)
         let distFromCamera = simd_length(pos - camPos)
 
-        // Reject hits that are implausibly far away — almost always means the
-        // tap "jumped" through a gap in the canopy onto the ground or another
-        // tree behind the subject.
         guard distFromCamera <= maxPlausibleDistance else {
             onTapFailed("That tap landed unexpectedly far away — probably a different tree or the ground behind it. Try tapping a clearer, closer edge of this tree's canopy.")
             return
         }
 
         if let a = pointA, let aDist = pointADistance {
-            // This tap is point B of the current pair.
             let delta = abs(distFromCamera - aDist)
             guard delta <= maxPairDistanceDelta else {
-                onTapFailed("That second tap landed much farther or closer than the first one — it likely hit a different tree. Try tapping the matching edge of the same canopy.")
+                onTapFailed("That second tap landed much farther or closer than the first one — it likely hit a different object. Try tapping the matching edge of the same canopy.")
                 return
             }
 
@@ -314,19 +335,20 @@ final class SpreadCoordinator: NSObject {
             // testing shows over/under.
             let distFeet = distMetres * 3.28084 * 1.45
 
-            placeMarker(at: pos, color: .systemOrange, spread: activeSpread)
-            drawLine(from: a, to: pos, spread: activeSpread)
+            placeMarker(at: pos, color: .systemOrange, spread: activeSpread, isA: false)
+            replaceLine(from: a, to: pos, spread: activeSpread)
 
             if activeSpread == 1 {
+                spread1A = a; spread1B = pos
                 spread1Binding.wrappedValue = distFeet
             } else {
+                spread2A = a; spread2B = pos
                 spread2Binding.wrappedValue = distFeet
             }
 
             pointA = nil
             pointADistance = nil
 
-            // Advance to whichever spread still needs capturing, or finish.
             if activeSpread == 1 && spread2Binding.wrappedValue == nil {
                 activeSpread = 2
             } else if activeSpread == 2 && spread1Binding.wrappedValue == nil {
@@ -335,34 +357,107 @@ final class SpreadCoordinator: NSObject {
                 activeSpread = 0
             }
         } else {
-            // This tap is point A of a new pair.
             pointA = pos
             pointADistance = distFromCamera
-            placeMarker(at: pos, color: .systemBlue, spread: activeSpread)
+            if activeSpread == 1 { spread1A = pos } else { spread2A = pos }
+            placeMarker(at: pos, color: .systemBlue, spread: activeSpread, isA: true)
         }
+    }
+
+    // MARK: - Drag to reposition
+
+    @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+        guard let sceneView else { return }
+
+        switch gesture.state {
+        case .began:
+            let location = gesture.location(in: sceneView)
+            let hits = sceneView.hitTest(location, options: [
+                SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue
+            ])
+            guard let hit = hits.first(where: { isMarkerNode($0.node) }) else { return }
+            let node = hit.node
+            draggingNode = node
+            draggingIsA = node.name?.hasSuffix("A") ?? false
+            draggingSpread = node.name?.hasPrefix("s1") == true ? 1 : 2
+
+        case .changed:
+            guard let node = draggingNode else { return }
+            let location = gesture.location(in: sceneView)
+
+            var hitResult: ARRaycastResult? = nil
+            if let query = sceneView.raycastQuery(from: location, allowing: .existingPlaneGeometry, alignment: .any) {
+                hitResult = sceneView.session.raycast(query).first
+            }
+            if hitResult == nil, let query = sceneView.raycastQuery(from: location, allowing: .estimatedPlane, alignment: .any) {
+                hitResult = sceneView.session.raycast(query).first
+            }
+            // Silently ignore frames where the raycast hits a wall or misses.
+            guard let result = hitResult, result.targetAlignment != .vertical else { return }
+
+            let col = result.worldTransform.columns.3
+            let newPos = SIMD3<Float>(col.x, col.y, col.z)
+            node.position = SCNVector3(newPos.x, newPos.y, newPos.z)
+
+            if draggingSpread == 1 {
+                if draggingIsA { spread1A = newPos } else { spread1B = newPos }
+                if let a = spread1A, let b = spread1B {
+                    replaceLine(from: a, to: b, spread: 1)
+                    spread1Binding.wrappedValue = Double(simd_length(b - a)) * 3.28084 * 1.45
+                }
+            } else {
+                if draggingIsA { spread2A = newPos } else { spread2B = newPos }
+                if let a = spread2A, let b = spread2B {
+                    replaceLine(from: a, to: b, spread: 2)
+                    spread2Binding.wrappedValue = Double(simd_length(b - a)) * 3.28084 * 1.45
+                }
+            }
+
+        case .ended, .cancelled:
+            draggingNode = nil
+            draggingSpread = 0
+
+        default:
+            break
+        }
+    }
+
+    private func isMarkerNode(_ node: SCNNode) -> Bool {
+        guard let name = node.name else { return false }
+        return name == "s1A" || name == "s1B" || name == "s2A" || name == "s2B"
     }
 
     // MARK: - AR Markers & Lines
 
-    private func placeMarker(at pos: SIMD3<Float>, color: UIColor, spread: Int) {
+    private func placeMarker(at pos: SIMD3<Float>, color: UIColor, spread: Int, isA: Bool) {
         guard let sceneView else { return }
-        let sphere = SCNSphere(radius: 0.03)
+        let sphere = SCNSphere(radius: 0.04)
         let mat = SCNMaterial()
         mat.diffuse.contents = color.withAlphaComponent(0.9)
         sphere.materials = [mat]
 
         let node = SCNNode(geometry: sphere)
         node.position = SCNVector3(pos.x, pos.y, pos.z)
+        node.name = "s\(spread)\(isA ? "A" : "B")"
         sceneView.scene.rootNode.addChildNode(node)
-        if spread == 1 { spread1Nodes.append(node) } else { spread2Nodes.append(node) }
+
+        if spread == 1 {
+            if isA { spread1MarkerA?.removeFromParentNode(); spread1MarkerA = node }
+            else   { spread1MarkerB?.removeFromParentNode(); spread1MarkerB = node }
+        } else {
+            if isA { spread2MarkerA?.removeFromParentNode(); spread2MarkerA = node }
+            else   { spread2MarkerB?.removeFromParentNode(); spread2MarkerB = node }
+        }
     }
 
-    private func drawLine(from a: SIMD3<Float>, to b: SIMD3<Float>, spread: Int) {
+    private func replaceLine(from a: SIMD3<Float>, to b: SIMD3<Float>, spread: Int) {
         guard let sceneView else { return }
 
-        // Build a thin box oriented between the two points.
+        if spread == 1 { spread1LineNode?.removeFromParentNode() }
+        else            { spread2LineNode?.removeFromParentNode() }
+
         let diff = b - a
-        let length = Double(sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z))
+        let length = Double(simd_length(diff))
         guard length > 0 else { return }
 
         let box = SCNBox(width: CGFloat(length), height: 0.01, length: 0.01, chamferRadius: 0)
@@ -371,18 +466,16 @@ final class SpreadCoordinator: NSObject {
         box.materials = [mat]
 
         let node = SCNNode(geometry: box)
+        node.name = "s\(spread)L"
 
-        // Position at midpoint.
         let mid = (a + b) * 0.5
         node.position = SCNVector3(mid.x, mid.y, mid.z)
 
-        // Orient along the diff vector.
-        let dir = SIMD3<Float>(diff.x, diff.y, diff.z) / Float(length)
+        let dir = simd_normalize(diff)
         let xAxis = SIMD3<Float>(1, 0, 0)
         let cross = simd_cross(xAxis, dir)
         let dot   = simd_dot(xAxis, dir)
         if simd_length(cross) < 1e-6 {
-            // Vectors are parallel.
             if dot < 0 { node.eulerAngles = SCNVector3(0, Float.pi, 0) }
         } else {
             let angle = acos(min(max(dot, -1), 1))
@@ -391,16 +484,18 @@ final class SpreadCoordinator: NSObject {
         }
 
         sceneView.scene.rootNode.addChildNode(node)
-        if spread == 1 { spread1Nodes.append(node) } else { spread2Nodes.append(node) }
+        if spread == 1 { spread1LineNode = node } else { spread2LineNode = node }
     }
 
     private func clearNodes(for spread: Int) {
         if spread == 1 {
-            spread1Nodes.forEach { $0.removeFromParentNode() }
-            spread1Nodes.removeAll()
+            spread1MarkerA?.removeFromParentNode(); spread1MarkerA = nil
+            spread1MarkerB?.removeFromParentNode(); spread1MarkerB = nil
+            spread1LineNode?.removeFromParentNode(); spread1LineNode = nil
         } else {
-            spread2Nodes.forEach { $0.removeFromParentNode() }
-            spread2Nodes.removeAll()
+            spread2MarkerA?.removeFromParentNode(); spread2MarkerA = nil
+            spread2MarkerB?.removeFromParentNode(); spread2MarkerB = nil
+            spread2LineNode?.removeFromParentNode(); spread2LineNode = nil
         }
     }
 }
