@@ -115,7 +115,7 @@ struct DistanceCaptureView: View {
         case .markTree:
             walkBanner(
                 "Stand at the trunk base",
-                detail: "Hold the device steady, then tap the button."
+                detail: "Hold the device as close to the trunk as you can reach, then tap."
             )
             Button("Mark Tree Base") {
                 if let pos = coordinator?.currentCameraPosition() {
@@ -130,7 +130,7 @@ struct DistanceCaptureView: View {
         case .markUser:
             walkBanner(
                 "Walk to your measuring spot",
-                detail: "Walk steadily — ARKit tracks your path. Tap when ready."
+                detail: "Walk steadily with the device at chest height. Tap when ready."
             )
             Button("Mark My Position") {
                 guard let treePos = treeWorldPos,
@@ -145,6 +145,12 @@ struct DistanceCaptureView: View {
 
         case .confirm:
             if let distance = walkDistanceFeet {
+                Text("Add trunk half-width (~0.5 ft for most trees) if you couldn't touch the trunk when marking.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
                 resultPanel(distanceFeet: distance) {
                     walkPhase = .markTree
                     treeWorldPos = nil
