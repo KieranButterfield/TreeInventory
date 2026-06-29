@@ -114,7 +114,7 @@ struct HeightCaptureView: View {
             } header: {
                 Text("Horizontal Distance")
             } footer: {
-                Text("AR works within ~10 ft; farther, use a tape measure.")
+                Text("LiDAR tap works within ~10 ft. Switch to 'Walk to measure' in the AR sheet for taller trees.")
             }
 
             Section {

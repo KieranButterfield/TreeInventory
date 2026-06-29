@@ -207,7 +207,7 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
         guard sd / mean < stabilityCV else { return }
 
         // Stable — lock and deliver.
-        deliverResult(cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: mean)
+        deliverResult(hitX: col.x, hitZ: col.z, cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: mean)
     }
 
     // MARK: - Manual tap (fallback / override)
@@ -246,10 +246,10 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
             return
         }
 
-        deliverResult(cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: fit.radius)
+        deliverResult(hitX: col.x, hitZ: col.z, cx: fit.cx, cz: fit.cz, sliceY: sliceY, points: points, radius: fit.radius)
     }
 
-    private func deliverResult(cx: Float, cz: Float, sliceY: Float, points: [(x: Float, z: Float)], radius: Float) {
+    private func deliverResult(hitX: Float, hitZ: Float, cx: Float, cz: Float, sliceY: Float, points: [(x: Float, z: Float)], radius: Float) {
         isLocked = true
         stopAutoScan()
 
@@ -258,13 +258,28 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
         let coverage = angularCoverageDegrees(of: points, aroundCenter: (cx, cz))
         let lowConfidence = coverage < 110
 
+        // Kasa fit is biased toward the camera when only a partial arc is visible.
+        // Correct by anchoring the ring's near edge at the visible trunk surface:
+        // ring_center = hit_point + radius * normalize(hit - camera)
+        var ringCX = cx, ringCZ = cz
+        if let frame = sceneView?.session.currentFrame {
+            let camX = frame.camera.transform.columns.3.x
+            let camZ = frame.camera.transform.columns.3.z
+            let dx = hitX - camX, dz = hitZ - camZ
+            let dist = sqrt(dx * dx + dz * dz)
+            if dist > 0.01 {
+                ringCX = hitX + (dx / dist) * radius
+                ringCZ = hitZ + (dz / dist) * radius
+            }
+        }
+
         print("[ARCapture] Result: radius=\(String(format: "%.3f", radius))m circ=\(Int(circumferenceInches))\" arc=\(Int(coverage))°")
 
         removeOverlays()
-        addCircleOverlay(center: SIMD3(cx, sliceY, cz), radius: radius)
+        addCircleOverlay(center: SIMD3(ringCX, sliceY, ringCZ), radius: radius)
         addLabelOverlay(
             text: String(format: "%.1f\" circ.", circumferenceInches),
-            position: SIMD3(cx, sliceY + 0.15, cz)
+            position: SIMD3(ringCX, sliceY + 0.15, ringCZ)
         )
         onResult(circumferenceInches, sliceRef, lowConfidence)
     }
