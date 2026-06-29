@@ -48,8 +48,12 @@ struct ARViewContainer: UIViewRepresentable {
     /// on-screen hint instead of the surveyor tapping blindly with no feedback.
     var onTapFailed: (String) -> Void = { _ in }
 
+    /// Called whenever the surveyor pinch-adjusts the ring, with the updated
+    /// circumference in inches. Use this to keep the confirm panel in sync.
+    var onCircumferenceUpdate: (Double) -> Void = { _ in }
+
     func makeCoordinator() -> ARSCNCoordinator {
-        ARSCNCoordinator(onResult: onResult, onTapFailed: onTapFailed)
+        ARSCNCoordinator(onResult: onResult, onTapFailed: onTapFailed, onCircumferenceUpdate: onCircumferenceUpdate)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -64,6 +68,13 @@ struct ARViewContainer: UIViewRepresentable {
             action: #selector(ARSCNCoordinator.handleTap(_:))
         )
         sceneView.addGestureRecognizer(tap)
+
+        // Pinch gesture — resizes the torus ring after a fit is shown
+        let pinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(ARSCNCoordinator.handlePinch(_:))
+        )
+        sceneView.addGestureRecognizer(pinch)
 
         context.coordinator.sceneView = sceneView
         context.coordinator.startSession()
@@ -88,15 +99,26 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
     weak var sceneView: ARSCNView?
     private let onResult: (Double, String?, Bool) -> Void
     private let onTapFailed: (String) -> Void
+    private let onCircumferenceUpdate: (Double) -> Void
 
     /// Overlay nodes so we can remove them on the next tap.
     private var overlayNodes: [SCNNode] = []
 
+    /// Live references to the current ring and label so pinch can adjust them.
+    private var activeTorus: SCNTorus?
+    private var activeLabelGeom: SCNText?
+    private var pendingRadius: Float = 0
+
     // MARK: Init
 
-    init(onResult: @escaping (Double, String?, Bool) -> Void, onTapFailed: @escaping (String) -> Void = { _ in }) {
+    init(
+        onResult: @escaping (Double, String?, Bool) -> Void,
+        onTapFailed: @escaping (String) -> Void = { _ in },
+        onCircumferenceUpdate: @escaping (Double) -> Void = { _ in }
+    ) {
         self.onResult = onResult
         self.onTapFailed = onTapFailed
+        self.onCircumferenceUpdate = onCircumferenceUpdate
     }
 
     // MARK: - Session lifecycle
@@ -249,13 +271,18 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
     private func removeOverlays() {
         overlayNodes.forEach { $0.removeFromParentNode() }
         overlayNodes.removeAll()
+        activeTorus = nil
+        activeLabelGeom = nil
+        pendingRadius = 0
     }
 
     private func addCircleOverlay(center: SIMD3<Float>, radius: Float) {
         guard let sceneView = sceneView else { return }
 
+        pendingRadius = radius
         // SCNTorus: ring radius = fit radius, pipe radius = thin visual tube.
         let torus = SCNTorus(ringRadius: CGFloat(radius), pipeRadius: CGFloat(max(radius * 0.03, 0.005)))
+        activeTorus = torus
         let material = SCNMaterial()
         material.diffuse.contents = UIColor.systemGreen.withAlphaComponent(0.85)
         material.isDoubleSided = true
@@ -273,6 +300,7 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
         guard let sceneView = sceneView else { return }
 
         let textGeom = SCNText(string: text, extrusionDepth: 0.001)
+        activeLabelGeom = textGeom
         textGeom.font = UIFont.boldSystemFont(ofSize: 0.05)
         textGeom.flatness = 0.005
         let mat = SCNMaterial()
@@ -297,6 +325,27 @@ final class ARSCNCoordinator: NSObject, ARSCNViewDelegate {
 
         sceneView.scene.rootNode.addChildNode(textNode)
         overlayNodes.append(textNode)
+    }
+
+    // MARK: - Pinch to adjust ring
+
+    /// Resizes the torus ring after a fit has been shown, letting the surveyor
+    /// visually match it to the trunk before confirming the measurement.
+    @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        guard gesture.state == .changed,
+              let torus = activeTorus,
+              pendingRadius > 0
+        else { return }
+
+        pendingRadius = max(pendingRadius * Float(gesture.scale), 0.01)
+        gesture.scale = 1.0   // reset so each event delivers a delta, not cumulative
+
+        torus.ringRadius = CGFloat(pendingRadius)
+        torus.pipeRadius = CGFloat(max(pendingRadius * 0.03, 0.005))
+
+        let newCirc = KasaFit.circumferenceInches(pendingRadius)
+        activeLabelGeom?.string = String(format: "%.1f\" circ.", newCirc)
+        onCircumferenceUpdate(newCirc)
     }
 
     // MARK: - Slice JSON persistence

@@ -41,6 +41,9 @@ struct DBHCaptureView: View {
                 },
                 onTapFailed: { reason in
                     showTapHint(reason)
+                },
+                onCircumferenceUpdate: { newCircumference in
+                    pendingCircumferenceInches = newCircumference
                 }
             )
             .ignoresSafeArea()
@@ -93,7 +96,9 @@ struct DBHCaptureView: View {
     // MARK: - Sub-views
 
     private var instructionBanner: some View {
-        Text("Slowly pan across the trunk at breast height for a couple seconds, then tap it")
+        Text(showConfirm
+             ? "Pinch the ring to adjust the fit, then confirm"
+             : "Slowly pan across the trunk at breast height for a couple seconds, then tap it")
             .font(.headline)
             .foregroundStyle(.white)
             .multilineTextAlignment(.center)
