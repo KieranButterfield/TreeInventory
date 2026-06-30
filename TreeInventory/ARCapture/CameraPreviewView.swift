@@ -120,11 +120,9 @@ struct CameraPreviewView: UIViewControllerRepresentable {
     }
 }
 
-/// Horizontal colored bar drawn over the live camera feed at the point the
-/// camera is currently aimed (the vertical center of the frame — by
-/// definition where the lens points). Color-coded the same way as the rest
-/// of the sighting UI: orange once the tilt is steeper than the usable
-/// range, otherwise yellow.
+/// Horizontal aim line and caption drawn over the live camera feed.
+/// The line is at the exact vertical centre of the frame — the point the
+/// camera is aimed at. A centre dot aids precise target alignment.
 struct AimBarOverlay: View {
     let caption: String
     let tooSteep: Bool
@@ -132,25 +130,45 @@ struct AimBarOverlay: View {
     private var tint: Color { tooSteep ? .orange : .yellow }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Rectangle()
-                    .fill(tint)
-                    .frame(height: 4)
-                    .shadow(color: .black.opacity(0.6), radius: 2)
-                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        ZStack {
+            // ── Aim line ──────────────────────────────────────────────────
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
 
-                VStack {
-                    Spacer()
-                    Text(caption)
-                        .font(.caption.bold())
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .padding(.bottom, 10)
+                ZStack {
+                    // Dark backing strip for contrast against bright sky.
+                    Rectangle()
+                        .fill(.black.opacity(0.45))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 5)
+
+                    // Coloured aim line.
+                    Rectangle()
+                        .fill(tint)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 2)
+
+                    // Centre dot for precise target alignment.
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 10, height: 10)
+                        .shadow(color: .black.opacity(0.8), radius: 1)
                 }
+
+                Spacer(minLength: 0)
+            }
+
+            // ── Caption ────────────────────────────────────────────────────
+            VStack {
+                Spacer()
+                Text(caption)
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .padding(.bottom, 10)
             }
         }
         .allowsHitTesting(false)

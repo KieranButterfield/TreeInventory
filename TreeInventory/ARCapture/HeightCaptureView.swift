@@ -40,23 +40,29 @@ private final class HeightMotionState {
     var isSighting = false
 
     private let motionManager = CMMotionManager()
+    // Rolling buffer — last ~1 second of readings at 30 Hz
+    private var pitchBuffer: [Double] = []
 
     func startSighting() {
         guard motionManager.isDeviceMotionAvailable else { return }
         isSighting = true
+        pitchBuffer.removeAll()
         motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
-            // Elevation angle of the device's back/camera axis above
-            // horizontal, from the gravity vector (see header comment).
             let gz = min(max(motion.gravity.z, -1), 1)
-            self.livePitch = asin(gz)
+            let pitch = asin(gz)
+            self.livePitch = pitch
+            self.pitchBuffer.append(pitch)
+            if self.pitchBuffer.count > 30 { self.pitchBuffer.removeFirst() }
         }
     }
 
     func lockAngle() -> Double {
         stopSighting()
-        return livePitch
+        // Average the last ~1 second of readings to reduce tremor noise.
+        guard pitchBuffer.count >= 5 else { return livePitch }
+        return pitchBuffer.reduce(0, +) / Double(pitchBuffer.count)
     }
 
     func stopSighting() {
